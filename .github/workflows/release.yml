@@ -1,7 +1,15 @@
 name: Windows release
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vX.Y.Z)
+        type: string
+        required: true
   push:
     tags: ['v*']
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 permissions:
   contents: read
 jobs:
@@ -9,6 +17,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -17,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ($env:GITHUB_REF_NAME -cne "v$version" -or (Get-Content package.json -Raw | ConvertFrom-Json).version -ne $version) {
+          if ($env:RELEASE_TAG -cne "v$version" -or (Get-Content package.json -Raw | ConvertFrom-Json).version -ne $version) {
             throw 'Tag and application versions must match.'
           }
       - run: npm ci
@@ -35,9 +45,9 @@ jobs:
           if (!$sig) { throw 'Missing installer signature.' }
           New-Item -ItemType Directory release | Out-Null
           Copy-Item -LiteralPath $exe.FullName,"$($exe.FullName).sig" -Destination release
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$([uri]::EscapeDataString($exe.Name))"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$([uri]::EscapeDataString($exe.Name))"
           @{
-            version = $env:GITHUB_REF_NAME.Substring(1)
+            version = $env:RELEASE_TAG.Substring(1)
             pub_date = [DateTime]::UtcNow.ToString('o')
             platforms = @{ 'windows-x86_64' = @{ signature = $sig; url = $url } }
           } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8NoBOM release/latest.json
@@ -58,4 +68,4 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "VibeRGB $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "VibeRGB $RELEASE_TAG" --generate-notes
