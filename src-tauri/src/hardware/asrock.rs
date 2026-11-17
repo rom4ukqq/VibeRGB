@@ -1,0 +1,418 @@
+use std::{
+    ffi::OsString,
+    fs::{File, OpenOptions},
+    io,
+    mem::size_of,
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
+    ptr::{null, null_mut},
+};
+
+use windows_sys::Win32::{
+    Devices::{
+        DeviceAndDriverInstallation::{
+            SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+            SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+            SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        },
+        HumanInterfaceDevice::HidD_GetHidGuid,
+    },
+    Foundation::{CloseHandle, ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE},
+    Storage::FileSystem::{
+        ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    },
+    System::{
+        Threading::CreateEventW,
+        IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED},
+    },
+};
+
+use super::{dim, smbios::Firmware, Controller, Device, Effect, Rgb, Zone};
+
+pub const BOARD_ID: &str = "asrock-b550m-pro4";
+pub const BOARD_NAME: &str = "ASRock B550M Pro4";
+const ZONES: [&str; 8] = [
+    "RGB LED 1",
+    "RGB LED 2",
+    "ARGB 1",
+    "ARGB 2",
+    "PCH",
+    "I/O cover",
+    "Motherboard",
+    "ARGB 3 / Audio",
+];
+const EFFECTS: [Effect; 3] = [
+    Effect {
+        id: "breathing",
+        name: "Breathing",
+        color: true,
+        brightness: true,
+    },
+    Effect {
+        id: "spectrum",
+        name: "Color cycle",
+        color: false,
+        brightness: false,
+    },
+    Effect {
+        id: "rainbow",
+        name: "Rainbow",
+        color: false,
+        brightness: false,
+    },
+];
+
+pub struct Board {
+    hid: File,
+    device: Device,
+    red_green_order: u8,
+    zone_mask: u8,
+    led_counts: [usize; 8],
+    direct_colors: [Rgb; 8],
+    direct_zones: u8,
+}
+
+impl Board {
+    pub fn open(firmware: &Firmware) -> Result<Self, String> {
+        if !firmware.board_matches("B550M Pro4") {
+            return Err("Windows could not confirm the motherboard model.".into());
+        }
+        let hid = open_hid().map_err(|error| format!("Polychrome USB: {error}"))?;
+        let availability = read_configuration(&hid, 1)?[0];
+        let counts = read_configuration(&hid, 2)?;
+        let red_green_order = read_configuration(&hid, 3)?[0];
+        let mut led_counts = [0; 8];
+        let mut zone_mask = 0;
+        let zones = ZONES
+            .iter()
+            .enumerate()
+            .filter(|(channel, _)| availability & (1 << channel) != 0 && counts[*channel] != 0x1e)
+            .map(|(channel, name)| {
+                let count = usize::from(counts[channel]);
+                led_counts[channel] = if count <= 100 { count } else { 0 };
+                zone_mask |= 1 << channel;
+                Zone {
+                    id: channel.to_string(),
+                    name: (*name).into(),
+                    effects: EFFECTS.to_vec(),
+                    direct: led_counts[channel] > 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        if zones.is_empty() {
+            return Err("The Polychrome controller reported no available zones.".into());
+        }
+        let device = Device {
+            id: BOARD_ID.into(),
+            name: BOARD_NAME.into(),
+            detail: "Polychrome USB".into(),
+            needs_pawnio_install: false,
+            zones,
+        };
+        Ok(Self {
+            hid,
+            device,
+            red_green_order,
+            zone_mask,
+            led_counts,
+            direct_colors: [[0; 3]; 8],
+            direct_zones: 0,
+        })
+    }
+
+    fn channel_color(&self, channel: usize, [red, green, blue]: Rgb) -> Rgb {
+        if self.red_green_order & (1 << channel) != 0 {
+            [red, green, blue]
+        } else {
+            [green, red, blue]
+        }
+    }
+
+    fn write_mode(&self, channel: usize, mode: u8, color: Rgb) -> Result<(), String> {
+        let [first, second, blue] = self.channel_color(channel, color);
+        let mut report = [0; 65];
+        report[1] = 0x10;
+        report[3..10].copy_from_slice(&[channel as u8, mode, first, second, blue, 0xe0, 0xff]);
+        exchange(&self.hid, &report).map(|_| ())
+    }
+
+    fn write_frame(&self) -> Result<(), String> {
+        // The hardware consumes one packed RGB buffer for every channel in Direct mode.
+        // The first report holds 18 pixels and continuations hold 19. There is no flash commit.
+        let mut payload = Vec::new();
+        let mut capacity = 8;
+        for (channel, &count) in self.led_counts.iter().enumerate() {
+            let color = self.channel_color(channel, self.direct_colors[channel]);
+            for _ in 0..count {
+                payload.extend_from_slice(&color);
+            }
+            if self.zone_mask & (1 << channel) != 0 {
+                capacity += if matches!(channel, 2 | 3 | 7) {
+                    100
+                } else {
+                    count
+                };
+            }
+        }
+        payload.resize(capacity * 3, 0);
+        let (first, rest) = payload.split_at(payload.len().min(54));
+        let mut report = [0; 65];
+        report[1] = 0x10;
+        report[3] = 0xff;
+        report[4] = 0xe3;
+        report[7] = 0xff;
+        report[9..9 + first.len()].copy_from_slice(first);
+        report[64] = 0x65;
+        exchange(&self.hid, &report)?;
+        for chunk in rest.chunks(57) {
+            let mut report = [0; 65];
+            report[1] = 0x10;
+            report[3] = 0xff;
+            report[4] = 0xe4;
+            report[5..5 + chunk.len()].copy_from_slice(chunk);
+            report[64] = 0x65;
+            exchange(&self.hid, &report)?;
+        }
+        Ok(())
+    }
+
+    fn set_direct_zones(&mut self, zones: u8) -> Result<(), String> {
+        let mask = self.red_green_order & !zones;
+        if mask != self.red_green_order & !self.direct_zones {
+            // Polychrome can flash on every Direct update while hardware R/G swap is enabled.
+            // Adjust only animated channels and restore their saved mask when they leave Direct.
+            let mut report = [0; 65];
+            report[1] = 0x15;
+            report[3] = 3;
+            report[4] = mask;
+            exchange(&self.hid, &report)?;
+        }
+        self.direct_zones = zones;
+        Ok(())
+    }
+}
+
+impl Drop for Board {
+    fn drop(&mut self) {
+        let _ = self.set_direct_zones(0);
+    }
+}
+
+fn channel(zone: &str) -> Result<usize, String> {
+    zone.parse::<usize>()
+        .ok()
+        .filter(|&value| value < ZONES.len())
+        .ok_or_else(|| "Invalid Polychrome zone.".into())
+}
+
+impl Controller for Board {
+    fn device(&self) -> &Device {
+        &self.device
+    }
+
+    fn apply(&mut self, zone: &str, mode: &str, color: Rgb, brightness: u8) -> Result<(), String> {
+        let channel = channel(zone)?;
+        let mode = match (mode, brightness) {
+            ("off", _) | (_, 0) => 0x00,
+            ("solid", _) => 0x01,
+            ("breathing", _) => 0x02,
+            ("spectrum", _) => 0x04,
+            ("rainbow", _) => 0x0e,
+            _ => return Err("Mode unavailable on Polychrome.".into()),
+        };
+        let previous = self.direct_zones;
+        self.set_direct_zones(previous & !(1 << channel))?;
+        if let Err(error) = self.write_mode(channel, mode, dim(color, brightness)) {
+            let _ = self.set_direct_zones(previous);
+            return Err(error);
+        }
+        self.direct_colors[channel] = [0; 3];
+        Ok(())
+    }
+
+    fn begin_animation(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
+        let channel = channel(zone)?;
+        let previous = self.direct_zones;
+        self.set_direct_zones(previous | (1 << channel))?;
+        if let Err(error) = self.write_mode(channel, 0x0f, color) {
+            let _ = self.set_direct_zones(previous);
+            return Err(error);
+        }
+        self.direct_colors[channel] = color;
+        Ok(())
+    }
+
+    fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
+        self.frames(&[(zone, color)])
+    }
+
+    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<(), String> {
+        for &(zone, color) in updates {
+            self.direct_colors[channel(zone)?] = color;
+        }
+        self.write_frame()
+    }
+}
+
+fn read_configuration(hid: &File, page: u8) -> Result<[u8; 8], String> {
+    let mut report = [0; 65];
+    report[1] = 0x14;
+    report[3] = page;
+    let reply = exchange(hid, &report)?;
+    // Windows includes the leading report ID. HIDAPI removes it for unnumbered input reports.
+    if reply[0] != 0 {
+        return Err("Unexpected Polychrome HID response.".into());
+    }
+    Ok(reply[5..13].try_into().unwrap())
+}
+
+fn exchange(hid: &File, report: &[u8; 65]) -> Result<[u8; 65], String> {
+    let mut output = *report;
+    let mut input = [0; 65];
+    let sent =
+        transfer(hid, &mut output, true).map_err(|error| format!("Polychrome write: {error}"))?;
+    if sent != output.len() {
+        return Err("Incomplete Polychrome write.".into());
+    }
+    let read = transfer(hid, &mut input, false)
+        .map_err(|error| format!("Polychrome response: {error}"))?;
+    if read != input.len() {
+        return Err("Incomplete Polychrome response.".into());
+    }
+    Ok(input)
+}
+
+fn transfer(hid: &File, buffer: &mut [u8], write: bool) -> io::Result<usize> {
+    // SAFETY: The buffer, event and OVERLAPPED stay alive until the request completes or is cancelled.
+    unsafe {
+        let handle = hid.as_raw_handle();
+        let event = CreateEventW(null(), 1, 0, null());
+        if event.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut request = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut count = 0;
+        let started = if write {
+            WriteFile(
+                handle,
+                buffer.as_ptr(),
+                buffer.len() as u32,
+                null_mut(),
+                &mut request,
+            )
+        } else {
+            ReadFile(
+                handle,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                null_mut(),
+                &mut request,
+            )
+        };
+        let result = if started == 0
+            && io::Error::last_os_error().raw_os_error() != Some(ERROR_IO_PENDING as i32)
+        {
+            Err(io::Error::last_os_error())
+        } else if GetOverlappedResultEx(handle, &request, &mut count, 350, 0) != 0 {
+            Ok(count as usize)
+        } else {
+            let error = io::Error::last_os_error();
+            CancelIoEx(handle, &request);
+            GetOverlappedResult(handle, &request, &mut count, 1);
+            Err(error)
+        };
+        CloseHandle(event);
+        result
+    }
+}
+
+struct DeviceList(HDEVINFO);
+
+impl Drop for DeviceList {
+    fn drop(&mut self) {
+        // SAFETY: The list owns the valid handle returned by SetupDiGetClassDevsW.
+        unsafe { SetupDiDestroyDeviceInfoList(self.0) };
+    }
+}
+
+fn open_hid() -> io::Result<File> {
+    const CONTROLLER_PATH: &str = "hid#vid_26ce&pid_01a2";
+    // SAFETY: SetupAPI writes into aligned buffers. Only a path matching the target HID is opened.
+    unsafe {
+        let mut hid_class = std::mem::zeroed();
+        HidD_GetHidGuid(&mut hid_class);
+        let raw_list = SetupDiGetClassDevsW(
+            &hid_class,
+            null(),
+            null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        );
+        if raw_list == INVALID_HANDLE_VALUE as HDEVINFO {
+            return Err(io::Error::last_os_error());
+        }
+        let list = DeviceList(raw_list);
+        let mut open_error = None;
+        for index in 0.. {
+            let mut interface = SP_DEVICE_INTERFACE_DATA {
+                cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+                ..Default::default()
+            };
+            if SetupDiEnumDeviceInterfaces(list.0, null(), &hid_class, index, &mut interface) == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) {
+                    break;
+                }
+                return Err(error);
+            }
+            let mut storage = [0u32; 1024];
+            let detail = storage
+                .as_mut_ptr()
+                .cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
+            (*detail).cbSize = if cfg!(target_pointer_width = "64") {
+                8
+            } else {
+                6
+            };
+            if SetupDiGetDeviceInterfaceDetailW(
+                list.0,
+                &interface,
+                detail,
+                size_of_val(&storage) as u32,
+                null_mut(),
+                null_mut(),
+            ) == 0
+            {
+                continue;
+            }
+            let wide = std::slice::from_raw_parts(
+                std::ptr::addr_of!((*detail).DevicePath).cast::<u16>(),
+                2046,
+            );
+            let Some(end) = wide.iter().position(|character| *character == 0) else {
+                continue;
+            };
+            let path = OsString::from_wide(&wide[..end]);
+            if !path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with(&format!(r"\\?\{CONTROLLER_PATH}"))
+            {
+                continue;
+            }
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .open(path)
+            {
+                Ok(file) => return Ok(file),
+                Err(error) => open_error = Some(error),
+            }
+        }
+        Err(open_error
+            .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HID 26CE:01A2 not found")))
+    }
+}
