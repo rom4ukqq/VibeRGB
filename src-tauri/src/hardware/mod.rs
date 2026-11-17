@@ -43,6 +43,7 @@ pub struct Device {
     pub detail: String,
     pub zones: Vec<Zone>,
     pub needs_pawnio_install: bool,
+    pub needs_pawnio_elevation: bool,
 }
 
 pub trait Controller: Send {
@@ -52,11 +53,14 @@ pub trait Controller: Send {
         self.apply(zone, "solid", color, 100)
     }
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String>;
-    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<(), String> {
+    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
+        let mut failures = Vec::new();
         for &(zone, color) in updates {
-            self.frame(zone, color)?;
+            if let Err(error) = self.frame(zone, color) {
+                failures.push((zone.to_owned(), error));
+            }
         }
-        Ok(())
+        Ok(failures)
     }
 }
 
@@ -84,13 +88,13 @@ impl Hardware {
             if firmware.board_matches("B550M Pro4")
                 && hardware.unavailable.iter().any(is_adata_memory)
             {
-                match ram::Dimm::discover() {
-                    Ok(modules) => {
-                        let count = hardware
-                            .unavailable
-                            .iter()
-                            .filter(|device| is_adata_memory(device))
-                            .count();
+                let count = hardware
+                    .unavailable
+                    .iter()
+                    .filter(|device| is_adata_memory(device))
+                    .count();
+                match ram::Dimm::discover(count) {
+                    Ok((modules, warning)) => {
                         if modules.len() == count {
                             hardware
                                 .unavailable
@@ -102,6 +106,9 @@ impl Hardware {
                                 .filter(|device| is_adata_memory(device))
                             {
                                 device.detail = format!("Found {} of {count} ENE RGB controllers. ENE modules are listed separately.", modules.len());
+                                if let Some(reason) = &warning {
+                                    device.detail.push_str(&format!(" {reason}"));
+                                }
                             }
                         }
                         hardware.controllers.extend(
@@ -119,6 +126,7 @@ impl Hardware {
                         {
                             device.detail = error.clone();
                             device.needs_pawnio_install = needs_pawnio_install;
+                            device.needs_pawnio_elevation = error == ram::NEEDS_ADMIN;
                         }
                     }
                 }
@@ -139,6 +147,7 @@ impl Hardware {
                 detail,
                 zones: Vec::new(),
                 needs_pawnio_install: false,
+                needs_pawnio_elevation: false,
             }),
         }
     }

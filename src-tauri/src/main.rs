@@ -10,9 +10,8 @@ use tauri::{
     AppHandle, Manager, State, WindowEvent, Wry,
 };
 
-use hardware::Device;
-use lighting::{ApplyResult, Assignment, Lighting};
-use profiles::{Profile, Profiles};
+use lighting::{ApplyResult, Discovery, Lighting};
+use profiles::{ProfileLibrary, Profiles};
 
 struct TrayMenu {
     open: MenuItem<Wry>,
@@ -72,30 +71,63 @@ fn set_language(menu: State<'_, TrayMenu>, language: &str) -> Result<(), String>
 }
 
 #[tauri::command]
-async fn devices(lighting: State<'_, Lighting>, refresh: bool) -> Result<Vec<Device>, String> {
+async fn devices(lighting: State<'_, Lighting>, refresh: bool) -> Result<Discovery, String> {
     lighting.devices(refresh).await
+}
+
+#[tauri::command]
+async fn install_pawnio() -> Result<&'static str, String> {
+    #[cfg(windows)]
+    return tauri::async_runtime::spawn_blocking(hardware::pawnio::install)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(not(windows))]
+    Err("PawnIO is only available on Windows.".into())
+}
+
+#[tauri::command]
+async fn restart_for_rgb_memory(app: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    if tauri::async_runtime::spawn_blocking(hardware::pawnio::restart_as_admin)
+        .await
+        .map_err(|error| error.to_string())??
+    {
+        app.exit(0);
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn apply_lighting(
     lighting: State<'_, Lighting>,
-    assignments: Vec<Assignment>,
+    assignments: Vec<lighting::Assignment>,
 ) -> Result<ApplyResult, String> {
     lighting.apply(assignments).await
 }
 
 #[tauri::command]
-fn list_profiles(profiles: State<'_, Profiles>) -> Result<Vec<Profile>, String> {
+fn list_profiles(profiles: State<'_, Profiles>) -> Result<ProfileLibrary, String> {
     profiles.list()
 }
 
 #[tauri::command]
-fn save_profile(
+async fn save_profile(
     profiles: State<'_, Profiles>,
+    lighting: State<'_, Lighting>,
     name: String,
-    assignments: Vec<Assignment>,
-) -> Result<Vec<Profile>, String> {
-    profiles.save(name, assignments)
+) -> Result<ProfileLibrary, String> {
+    profiles.save(name, lighting.active().await?)
+}
+
+#[tauri::command]
+async fn replace_profile(profiles: State<'_, Profiles>, lighting: State<'_, Lighting>, id: String) -> Result<ProfileLibrary, String> {
+    profiles.replace(&id, lighting.active().await?)
+}
+
+#[tauri::command]
+fn set_startup_profile(profiles: State<'_, Profiles>, id: Option<String>) -> Result<ProfileLibrary, String> {
+    profiles.set_startup(id)
 }
 
 #[tauri::command]
@@ -103,12 +135,12 @@ fn rename_profile(
     profiles: State<'_, Profiles>,
     id: String,
     name: String,
-) -> Result<Vec<Profile>, String> {
+) -> Result<ProfileLibrary, String> {
     profiles.rename(&id, name)
 }
 
 #[tauri::command]
-fn delete_profile(profiles: State<'_, Profiles>, id: String) -> Result<Vec<Profile>, String> {
+fn delete_profile(profiles: State<'_, Profiles>, id: String) -> Result<ProfileLibrary, String> {
     profiles.delete(&id)
 }
 
@@ -118,24 +150,33 @@ async fn apply_profile(
     profiles: State<'_, Profiles>,
     id: String,
 ) -> Result<ApplyResult, String> {
-    let profile = profiles
-        .list()?
-        .into_iter()
-        .find(|profile| profile.id == id)
-        .ok_or("Profile not found.")?;
-    lighting.apply(profile.assignments).await
+    lighting.apply(profiles.assignments(&id)?).await
 }
 
 fn main() {
+    #[cfg(windows)]
+    if !hardware::pawnio::wait_for_previous_instance() {
+        return;
+    }
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            show_window(app)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if !args.iter().any(|arg| arg == "--autostart") {
+                show_window(app);
+            }
         }))
+        .plugin(tauri_plugin_autostart::Builder::new().arg("--autostart").build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config = app.path().app_config_dir()?.join("profiles.json");
             app.manage(setup_tray(app.handle())?);
-            app.manage(Profiles::new(config));
-            app.manage(Lighting::start(app.handle().clone()));
+            if !std::env::args_os().any(|arg| arg == "--autostart") {
+                show_window(app.handle());
+            }
+            let profiles = Profiles::new(config);
+            let startup = profiles.startup();
+            app.manage(profiles);
+            app.manage(Lighting::start(app.handle().clone(), startup));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -148,9 +189,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             set_language,
             devices,
+            install_pawnio,
+            restart_for_rgb_memory,
             apply_lighting,
             list_profiles,
             save_profile,
+            replace_profile,
+            set_startup_profile,
             rename_profile,
             delete_profile,
             apply_profile,

@@ -4,3 +4,5 @@
 /src-tauri/gen/
 /src-tauri/resources/pawnio/*.exe
 /src-tauri/resources/pawnio/*.bin
+!/src-tauri/resources/pawnio/PawnIO_setup.exe
+!/src-tauri/resources/pawnio/SmbusPIIX4.bin

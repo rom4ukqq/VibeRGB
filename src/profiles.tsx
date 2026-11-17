@@ -8,58 +8,63 @@ type Props = {
   profiles: Profile[];
   canSave: boolean;
   pending: boolean;
-  onSave: (name: string) => Promise<void>;
-  onRename: (id: string, name: string) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
-  onApply: (id: string) => Promise<void>;
+  onSave: (name: string) => Promise<boolean>;
+  onReplace: (id: string) => Promise<boolean>;
+  onRename: (id: string, name: string) => Promise<boolean>;
+  onDelete: (id: string) => Promise<boolean>;
+  onApply: (id: string) => Promise<boolean>;
 };
 
-export function Profiles({ t, profiles, canSave, pending, onSave, onRename, onDelete, onApply }: Props) {
+export function Profiles({ t, profiles, canSave, pending, onSave, onReplace, onRename, onDelete, onApply }: Props) {
   const [name, setName] = useState('');
   const [renaming, setRenaming] = useState<{ id: string; name: string }>();
-  const [deleting, setDeleting] = useState<string>();
+  const [confirmation, setConfirmation] = useState<{ id: string; action: 'delete' | 'replace' }>();
 
   return <>
     <form className="panel save-form" onSubmit={event => {
       event.preventDefault();
-      if (!pending && canSave && name.trim()) void onSave(name);
+      if (!pending && canSave && name.trim()) void onSave(name).then(saved => { if (saved) setName(''); });
     }}>
       <label>{t.profileName}
         <input value={name} maxLength={64} onChange={event => setName(event.target.value)} />
       </label>
-      <Button appearance="primary" type="submit" disabled={pending || !canSave || !name.trim()}>{t.save}</Button>
+      <Button className="primary-action" appearance="primary" type="submit" disabled={pending || !canSave || !name.trim()}>{t.save}</Button>
       {!canSave && <small>{t.saveHint}</small>}
     </form>
     <section className="profiles" aria-label={t.savedProfiles}>
-      {!profiles.length && <p className="muted">{t.emptyProfiles}</p>}
+      {!profiles.length && <p className="glass empty-state">{t.emptyProfiles}</p>}
       {profiles.map(profile => <article key={profile.id} className="profile">
         <div className="profile-header">
           <div><h2>{profile.name}</h2><small>{t.profileZones}: {profile.assignments.length}</small></div>
-          <Button appearance="primary" disabled={pending} onClick={() => void onApply(profile.id)}>{t.apply}</Button>
+          <Button className="primary-action" appearance="primary" disabled={pending} onClick={() => void onApply(profile.id)}>{t.apply}</Button>
         </div>
         {renaming?.id === profile.id ? <form className="inline-actions" onSubmit={event => {
           event.preventDefault();
           if (!pending && renaming.name.trim()) {
-            void onRename(profile.id, renaming.name);
-            setRenaming(undefined);
+            void onRename(profile.id, renaming.name).then(saved => { if (saved) setRenaming(undefined); });
           }
         }}>
           <input autoFocus aria-label={t.newName} value={renaming.name} maxLength={64}
             onChange={event => setRenaming({ id: profile.id, name: event.target.value })} />
-          <Button type="submit" disabled={pending || !renaming.name.trim()}>{t.save}</Button>
-          <Button appearance="subtle" onClick={() => setRenaming(undefined)}>{t.cancel}</Button>
-        </form> : deleting === profile.id ? <div className="inline-actions">
-          <span>{t.deleteQuestion}</span>
-          <Button disabled={pending} onClick={() => { void onDelete(profile.id); setDeleting(undefined); }}>{t.remove}</Button>
-          <Button appearance="subtle" onClick={() => setDeleting(undefined)}>{t.cancel}</Button>
+          <Button appearance="primary" className="primary-action" type="submit" disabled={pending || !renaming.name.trim()}>{t.save}</Button>
+          <Button type="button" appearance="subtle" onClick={() => setRenaming(undefined)}>{t.cancel}</Button>
+        </form> : confirmation?.id === profile.id ? <div className="inline-actions">
+          <span>{confirmation.action === 'delete' ? t.deleteQuestion : t.replaceQuestion}</span>
+          <Button disabled={pending} onClick={() => { const action = confirmation.action === 'delete' ? onDelete : onReplace;
+            void action(profile.id).then(saved => { if (saved) setConfirmation(undefined); }); }}>{confirmation.action === 'delete' ? t.remove : t.replace}</Button>
+          <Button appearance="subtle" onClick={() => setConfirmation(undefined)}>{t.cancel}</Button>
         </div> : <div className="inline-actions">
           <Button appearance="subtle" disabled={pending} onClick={() => {
-            setDeleting(undefined);
+            setConfirmation(undefined);
             setRenaming({ id: profile.id, name: profile.name });
           }}>{t.rename}</Button>
+          <Button appearance="subtle" disabled={pending || !canSave} onClick={() => {
+            setRenaming(undefined);
+            setConfirmation({ id: profile.id, action: 'replace' });
+          }}>{t.replace}</Button>
           <Button appearance="subtle" disabled={pending} onClick={() => {
             setRenaming(undefined);
-            setDeleting(profile.id);
+            setConfirmation({ id: profile.id, action: 'delete' });
           }}>{t.remove}</Button>
         </div>}
       </article>)}

@@ -106,6 +106,7 @@ impl Board {
             name: BOARD_NAME.into(),
             detail: "Polychrome USB".into(),
             needs_pawnio_install: false,
+            needs_pawnio_elevation: false,
             zones,
         };
         Ok(Self {
@@ -242,14 +243,14 @@ impl Controller for Board {
     }
 
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
-        self.frames(&[(zone, color)])
+        self.frames(&[(zone, color)]).map(|_| ())
     }
 
-    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<(), String> {
+    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
         for &(zone, color) in updates {
             self.direct_colors[channel(zone)?] = color;
         }
-        self.write_frame()
+        self.write_frame().map(|_| Vec::new())
     }
 }
 

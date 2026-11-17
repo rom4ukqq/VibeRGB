@@ -1,9 +1,19 @@
 export type Language = 'en' | 'ru';
 
 const en = {
+  launch: 'Startup', loginStart: 'Start when I sign in to Windows', trayStart: 'Opens in the system tray.',
+  animatedBackground: 'Animated background', updates: 'Updates', autoCheck: 'Automatically check for updates',
+  idle: 'Check for a newer version', current: 'You have the latest version', available: 'Update available',
+  checking: 'Checking…', installing: 'Installing update…', updateFailed: 'Could not check for updates',
+  checkUpdate: 'Check now', installUpdate: 'Install and restart',
+  startupProfile: 'Startup profile', noStartup: 'Do not apply', replace: 'Replace with current scene',
+  replaceQuestion: 'Replace the lighting saved in this profile?', animationFailed: 'Animation stopped', refreshIssues: 'Some zones are unavailable.',
   studio: 'Lighting Studio', profiles: 'Profiles', settings: 'Settings', sections: 'Sections',
   language: 'Language', interface: 'Interface', devices: 'Devices', refresh: 'Refresh devices',
   all: 'All devices', active: 'Connected', zones: 'Zones', unavailable: 'Control unavailable',
+  installPawnio: 'Install PawnIO', pawnioInstalled: 'PawnIO is installed.',
+  restartAsAdmin: 'Restart as administrator',
+  pawnioRestart: 'Restart Windows to finish installing PawnIO.',
   stop: 'Stop animation', dismiss: 'Dismiss', preview: 'Preview', noEffect: 'No effect',
   controls: 'Lighting controls', type: 'Effect type', sync: 'Sync', hardware: 'Hardware',
   independent: 'Built-in effects run independently on each controller.',
@@ -22,9 +32,19 @@ const en = {
 } as const;
 
 const ru: { [K in keyof typeof en]: string } = {
+  launch: 'Запуск', loginStart: 'Запускать при входе в Windows', trayStart: 'Приложение откроется в трее.',
+  animatedBackground: 'Анимированный фон', updates: 'Обновления', autoCheck: 'Автоматически проверять обновления',
+  idle: 'Проверка новой версии', current: 'Установлена последняя версия', available: 'Доступна версия',
+  checking: 'Проверяем…', installing: 'Установка обновления…', updateFailed: 'Не удалось проверить обновления',
+  checkUpdate: 'Проверить сейчас', installUpdate: 'Установить и перезапустить',
+  startupProfile: 'Профиль при запуске', noStartup: 'Не применять', replace: 'Заменить текущей сценой',
+  replaceQuestion: 'Заменить подсветку, сохранённую в этом профиле?', animationFailed: 'Анимация остановлена', refreshIssues: 'Часть зон недоступна.',
   studio: 'Студия света', profiles: 'Профили', settings: 'Настройки', sections: 'Разделы',
   language: 'Язык', interface: 'Интерфейс', devices: 'Устройства', refresh: 'Обновить устройства',
   all: 'Все устройства', active: 'Активных', zones: 'Зоны', unavailable: 'Управление недоступно',
+  installPawnio: 'Установить PawnIO', pawnioInstalled: 'PawnIO установлен.',
+  restartAsAdmin: 'Перезапустить от имени администратора',
+  pawnioRestart: 'Перезагрузите Windows, чтобы завершить установку PawnIO.',
   stop: 'Остановить анимацию', dismiss: 'Закрыть уведомление', preview: 'Предпросмотр', noEffect: 'Нет эффекта',
   controls: 'Настройки подсветки', type: 'Тип эффекта', sync: 'Синхронизация', hardware: 'Контроллер',
   independent: 'Встроенные эффекты идут независимо на каждом устройстве.',
@@ -48,6 +68,7 @@ export type Messages = typeof ru;
 export function sceneName(id: string, fallback: string, labels: Messages) {
   switch (id) {
     case 'solid': return labels.color;
+    case 'sync-rainbow': return labels.rainbow;
     case 'off': case 'pulse': case 'hue': case 'breathing': case 'spectrum': case 'rainbow':
       return labels[id];
     default: return fallback;
@@ -56,6 +77,8 @@ export function sceneName(id: string, fallback: string, labels: Messages) {
 
 // Controller diagnostics use English on the IPC boundary.
 const diagnosticRu = [
+ ["No free SMBus address is available for the ENE module.", "Нет свободного адреса SMBus для модуля ENE."],
+ ["Could not track the elevated process.", "Не удалось получить доступ к процессу с повышенными правами."],
  [
   "SMBIOS did not report the exact part number. The RGB controller is unconfirmed.",
   "SMBIOS не сообщает точный артикул. RGB-контроллер не подтверждён."
@@ -84,6 +107,22 @@ const diagnosticRu = [
   "RGB memory control on this board requires PawnIO.",
   "Для RGB-памяти на этой плате нужен установленный PawnIO."
  ],
+[
+  "Run VibeRGB as administrator to control RGB memory.",
+  "Запустите VibeRGB от имени администратора, чтобы управлять подсветкой памяти."
+],
+[
+  "PawnIO was not installed.",
+  "PawnIO не установлен."
+],
+[
+  "PawnIO installation is already running.",
+  "Установка PawnIO уже запущена."
+],
+[
+  "Could not track the PawnIO installer.",
+  "Не удалось отследить завершение установки PawnIO."
+],
  [
   "Windows could not confirm the motherboard model.",
   "Windows не подтвердила модель материнской платы."

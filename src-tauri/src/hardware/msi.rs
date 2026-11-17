@@ -205,6 +205,7 @@ impl Gpu {
             name: GPU_NAME.into(),
             detail: "MSI Mystic Light · NVIDIA NVAPI".into(),
             needs_pawnio_install: false,
+            needs_pawnio_elevation: false,
             zones: vec![Zone {
                 id: "gpu".into(),
                 name: "GPU lighting".into(),

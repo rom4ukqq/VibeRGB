@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter};
 use crate::hardware::{dim, Device, Hardware, Rgb};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const COLOR_CYCLE_SECONDS: f64 = 6.0;
 
 #[derive(Clone, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,15 +40,23 @@ fn normal_speed() -> u16 {
     100
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ApplyResult {
+    pub revision: u64,
     pub count: usize,
     pub issues: Vec<String>,
     pub active: Vec<Assignment>,
 }
 
+#[derive(Serialize)]
+pub struct Discovery {
+    devices: Vec<Device>,
+    state: ApplyResult,
+}
+
 enum Request {
-    Devices(bool, Sender<Vec<Device>>),
+    Active(Sender<Vec<Assignment>>),
+    Devices(bool, Sender<Discovery>),
     Apply(Vec<Assignment>, Sender<ApplyResult>),
     Shutdown(Sender<()>),
 }
@@ -55,13 +64,25 @@ enum Request {
 pub struct Lighting(Sender<Request>);
 
 impl Lighting {
-    pub fn start(app: AppHandle) -> Self {
+    pub fn start(app: AppHandle, startup: Result<Option<Vec<Assignment>>, String>) -> Self {
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || Worker::new(app).run(receiver));
+        thread::spawn(move || {
+            let mut worker = Worker::new(app);
+            worker.initial_issues = match startup {
+                Ok(Some(assignments)) => worker.apply(assignments).0.issues,
+                Ok(None) => Vec::new(),
+                Err(error) => vec![error],
+            };
+            worker.run(receiver);
+        });
         Self(sender)
     }
 
-    pub async fn devices(&self, refresh: bool) -> Result<Vec<Device>, String> {
+    pub async fn active(&self) -> Result<Vec<Assignment>, String> {
+        self.request(Request::Active).await
+    }
+
+    pub async fn devices(&self, refresh: bool) -> Result<Discovery, String> {
         self.request(|reply| Request::Devices(refresh, reply)).await
     }
 
@@ -104,6 +125,7 @@ struct Animation {
 enum AnimationKind {
     Pulse,
     Hue,
+    Rainbow(f64),
 }
 
 impl AnimationKind {
@@ -111,6 +133,7 @@ impl AnimationKind {
         match mode {
             "pulse" => Some(Self::Pulse),
             "hue" => Some(Self::Hue),
+            "sync-rainbow" => Some(Self::Rainbow(0.0)),
             _ => None,
         }
     }
@@ -121,7 +144,7 @@ impl AnimationKind {
                 let level = 0.15 + 0.85 * (0.5 - 0.5 * (seconds * TAU / 4.0).cos());
                 base.map(|channel| (f64::from(channel) * level).round() as u8)
             }
-            Self::Hue => {
+            Self::Hue | Self::Rainbow(_) => {
                 const COLORS: [Rgb; 6] = [
                     [255, 0, 0],
                     [255, 255, 0],
@@ -130,7 +153,11 @@ impl AnimationKind {
                     [0, 0, 255],
                     [255, 0, 255],
                 ];
-                let position = seconds.rem_euclid(6.0);
+                let offset = match self {
+                    Self::Rainbow(offset) => offset,
+                    _ => 0.0,
+                };
+                let position = (seconds + offset).rem_euclid(COLOR_CYCLE_SECONDS);
                 let index = position.floor() as usize;
                 let start = COLORS[index];
                 let end = COLORS[(index + 1) % COLORS.len()];
@@ -148,6 +175,8 @@ struct Worker {
     hardware: Hardware,
     active: BTreeMap<Target, Assignment>,
     animations: BTreeMap<Target, Animation>,
+    revision: u64,
+    initial_issues: Vec<String>,
     epoch: Instant,
 }
 
@@ -158,6 +187,8 @@ impl Worker {
             hardware: Hardware::discover(),
             active: BTreeMap::new(),
             animations: BTreeMap::new(),
+            revision: 0,
+            initial_issues: Vec::new(),
             epoch: Instant::now(),
         }
     }
@@ -172,10 +203,17 @@ impl Worker {
             };
             match request {
                 Ok(Request::Devices(refresh, reply)) => {
+                    let mut issues = std::mem::take(&mut self.initial_issues);
                     if refresh {
-                        self.refresh();
+                        issues.extend(self.refresh());
                     }
-                    let _ = reply.send(self.hardware.devices());
+                    let _ = reply.send(Discovery {
+                        devices: self.hardware.devices(),
+                        state: self.snapshot(0, issues),
+                    });
+                }
+                Ok(Request::Active(reply)) => {
+                    let _ = reply.send(self.active.values().cloned().collect());
                 }
                 Ok(Request::Apply(assignments, reply)) => {
                     let (result, frame_start) = self.apply(assignments);
@@ -194,19 +232,31 @@ impl Worker {
             }
             let now = Instant::now();
             if !self.animations.is_empty() && now >= next_frame {
-                for error in self.frame(now) {
-                    let _ = self.app.emit("lighting-error", error);
+                let issues = self.frame(now);
+                if !issues.is_empty() {
+                    self.revision += 1;
+                    let _ = self.app.emit("lighting-error", self.snapshot(0, issues));
                 }
                 next_frame = now + FRAME_INTERVAL;
             }
         }
     }
 
-    fn refresh(&mut self) {
+    fn refresh(&mut self) -> Vec<String> {
+        self.revision += 1;
         // Release the old controller handles before enumerating again.
         self.hardware = Hardware::default();
         self.hardware = Hardware::discover();
         let mut stopped = Vec::new();
+        let devices = self.hardware.devices();
+        self.active.retain(|target, _| {
+            let present = devices.iter().any(|device| device.id == target.device_id
+                && device.zones.iter().any(|zone| zone.id == target.zone_id));
+            if !present {
+                stopped.push(format!("{} / {} — Zone unavailable.", target.device_id, target.zone_id));
+            }
+            present
+        });
         let animations: Vec<_> = self
             .animations
             .keys()
@@ -215,21 +265,22 @@ impl Worker {
         self.animations.clear();
         for assignment in animations {
             if let Err(error) = self.apply_one(&assignment) {
+                self.active.remove(&assignment.target);
                 stopped.push(format!(
                     "{} / {} — {error}",
                     assignment.target.device_id, assignment.target.zone_id
                 ));
             }
         }
-        if !stopped.is_empty() {
-            let _ = self.app.emit(
-                "lighting-error",
-                format!("Animation stopped: {}", stopped.join(", ")),
-            );
-        }
+        stopped
+    }
+
+    fn snapshot(&self, count: usize, issues: Vec<String>) -> ApplyResult {
+        ApplyResult { revision: self.revision, count, issues, active: self.active.values().cloned().collect() }
     }
 
     fn apply(&mut self, assignments: Vec<Assignment>) -> (ApplyResult, Option<Instant>) {
+        self.revision += 1;
         let targets: BTreeMap<_, _> = assignments
             .into_iter()
             .map(|assignment| (assignment.target.clone(), assignment))
@@ -254,6 +305,7 @@ impl Worker {
         }
         (
             ApplyResult {
+                revision: self.revision,
                 count: changed
                     .iter()
                     .filter(|target| self.active.contains_key(*target))
@@ -267,6 +319,13 @@ impl Worker {
 
     fn apply_one(&mut self, assignment: &Assignment) -> Result<(), String> {
         let target = &assignment.target;
+        let mode = assignment.mode.as_str();
+        let animation = match AnimationKind::from_mode(mode) {
+            Some(AnimationKind::Rainbow(_)) => {
+                Some(AnimationKind::Rainbow(self.rainbow_offset(target)))
+            }
+            other => other,
+        };
         let controller = self
             .hardware
             .controller(&target.device_id)
@@ -277,9 +336,8 @@ impl Worker {
             .iter()
             .find(|zone| zone.id == target.zone_id)
             .ok_or("Zone unavailable.")?;
-        let mode = assignment.mode.as_str();
         let brightness = assignment.brightness.min(100);
-        if let Some(kind) = AnimationKind::from_mode(mode) {
+        if let Some(kind) = animation {
             if !zone.direct {
                 return Err("Animation is unavailable on this zone.".into());
             }
@@ -311,6 +369,29 @@ impl Worker {
         controller.apply(&target.zone_id, mode, assignment.color, brightness)?;
         self.animations.remove(target);
         Ok(())
+    }
+
+    fn rainbow_offset(&self, target: &Target) -> f64 {
+        // Use the device layout so changing one target doesn't move the others.
+        let zones: Vec<_> = self
+            .hardware
+            .controllers
+            .iter()
+            .flat_map(|controller| {
+                let device = controller.device();
+                device
+                    .zones
+                    .iter()
+                    .filter(|zone| zone.direct)
+                    .map(|zone| (&device.id, &zone.id))
+            })
+            .collect();
+        zones
+            .iter()
+            .position(|&(device, zone)| device == &target.device_id && zone == &target.zone_id)
+            .map_or(0.0, |index| {
+                COLOR_CYCLE_SECONDS * index as f64 / zones.len() as f64
+            })
     }
 
     fn frame(&mut self, now: Instant) -> Vec<String> {
@@ -362,7 +443,13 @@ impl Worker {
         let mut failures = Vec::new();
         for (device, batch, result) in results {
             match result {
-                Ok(()) => {
+                Ok(zone_failures) => {
+                    for (zone_id, error) in zone_failures {
+                        let target = Target { device_id: device.clone(), zone_id };
+                        failures.push(format!("Animation stopped ({} / {}) — {error}", device, target.zone_id));
+                        self.animations.remove(&target);
+                        self.active.remove(&target);
+                    }
                     for (target, color) in batch {
                         if let Some(animation) = self.animations.get_mut(&target) {
                             animation.last = Some(color);

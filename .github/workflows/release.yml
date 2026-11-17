@@ -1,0 +1,61 @@
+name: Windows release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -cne "v$version" -or (Get-Content package.json -Raw | ConvertFrom-Json).version -ne $version) {
+            throw 'Tag and application versions must match.'
+          }
+      - run: npm ci
+      - name: Build and sign Windows installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: npm run tauri -- build --bundles nsis -- --locked
+      - name: Prepare updater manifest
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($files.Count -ne 1) { throw 'Expected one NSIS installer.' }
+          $exe = $files[0]
+          $sig = (Get-Content -Raw -LiteralPath "$($exe.FullName).sig").Trim()
+          if (!$sig) { throw 'Missing installer signature.' }
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item -LiteralPath $exe.FullName,"$($exe.FullName).sig" -Destination release
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$([uri]::EscapeDataString($exe.Name))"
+          @{
+            version = $env:GITHUB_REF_NAME.Substring(1)
+            pub_date = [DateTime]::UtcNow.ToString('o')
+            platforms = @{ 'windows-x86_64' = @{ signature = $sig; url = $url } }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8NoBOM release/latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release/*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "VibeRGB $GITHUB_REF_NAME" --generate-notes

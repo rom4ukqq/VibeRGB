@@ -3,5 +3,5 @@
   "identifier": "main",
   "description": "Local VibeRGB window",
   "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:resources:allow-close", "autostart:default", "updater:default"]
 }

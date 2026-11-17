@@ -29,6 +29,11 @@ type Close = unsafe extern "system" fn(HANDLE) -> i32;
 const BYTE_DATA: u64 = 2;
 const WORD_DATA: u64 = 3;
 const APPLY: u16 = 0x80a0;
+const DEFAULT_ENE_ADDRESS: u8 = 0x77;
+const SLOT_SELECT: u16 = 0x80f8;
+const I2C_ADDRESS: u16 = 0x80f9;
+const NO_SUCH_DEVICE: u32 = 0x8007_01b1;
+pub(super) const NEEDS_ADMIN: &str = "Run VibeRGB as administrator to control RGB memory.";
 const SMBUS_MODULE: &[u8] = include_bytes!("../../resources/pawnio/SmbusPIIX4.bin");
 
 struct Library(HMODULE);
@@ -79,7 +84,11 @@ impl Bus {
             let execute = transmute::<_, Execute>(symbol(c"pawnio_execute")?);
             let close = transmute::<_, Close>(symbol(c"pawnio_close")?);
             let mut handle = null_mut();
-            status(open(&mut handle), "PawnIO open")?;
+            let result = open(&mut handle);
+            if matches!(result as u32, 0x80070005 | 0xc0000022 | 0xd0000022) {
+                return Err(NEEDS_ADMIN.into());
+            }
+            status(result, "PawnIO open")?;
             let mutex_name: Vec<_> = r"Global\Access_SMBUS.HTP.Method"
                 .encode_utf16()
                 .chain([0])
@@ -98,7 +107,7 @@ impl Bus {
             };
             let guard = bus.lock()?;
             status(
-                load(handle, module.as_ptr(), module.len()),
+                load(handle, SMBUS_MODULE.as_ptr(), SMBUS_MODULE.len()),
                 "SmbusPIIX4 load",
             )?;
             bus.call(c"ioctl_piix4_port_sel", &[0], &mut [0])?;
@@ -115,9 +124,13 @@ impl Bus {
     }
 
     fn call(&self, name: &std::ffi::CStr, input: &[u64], output: &mut [u64]) -> Result<(), String> {
+        status(self.call_status(name, input, output), "SMBus")
+    }
+
+    fn call_status(&self, name: &std::ffi::CStr, input: &[u64], output: &mut [u64]) -> i32 {
         let mut returned = 0;
         // SAFETY: Buffers remain valid during the synchronous call. Sizes are in u64 entries.
-        let result = unsafe {
+        unsafe {
             (self.execute)(
                 self.handle,
                 name.as_ptr(),
@@ -127,8 +140,18 @@ impl Bus {
                 output.len(),
                 &mut returned,
             )
-        };
-        status(result, "SMBus")
+        }
+    }
+
+    fn address_available(&self, address: u8) -> Result<bool, String> {
+        // SMBus Receive Byte checks whether an address responds without writing data.
+        let result = self.call_status(c"ioctl_smbus_xfer", &[address.into(), 1, 0, 1], &mut [0]);
+        if result as u32 == NO_SUCH_DEVICE {
+            Ok(true)
+        } else {
+            status(result, "SMBus")?;
+            Ok(false)
+        }
     }
 
     fn read_byte(&self, address: u8, command: u8) -> Result<u8, String> {
@@ -193,46 +216,101 @@ pub struct Dimm {
 }
 
 impl Dimm {
-    pub fn discover() -> Result<Vec<Self>, String> {
+    pub fn discover(expected: usize) -> Result<(Vec<Self>, Option<String>), String> {
         let bus = Arc::new(Bus::open()?);
         let _guard = bus.lock()?;
-        let devices = (0x70..=0x76)
-            .filter_map(|address| Self::identify(&bus, address))
-            .collect::<Vec<_>>();
+        let mut devices = Vec::new();
+        let mut issues = Vec::new();
+        for address in 0x70..DEFAULT_ENE_ADDRESS {
+            match Self::identify(&bus, address) {
+                Ok(Some(device)) => devices.push(device),
+                Ok(None) => {}
+                Err(error) => issues.push(format!("SMBus {address:#04x} — {error}")),
+            }
+        }
+        if let Err(error) = Self::resolve_default_address(&bus, expected, &mut devices) {
+            issues.push(error);
+        }
+        let warning = (!issues.is_empty()).then(|| issues.join(" "));
         if devices.is_empty() {
+            if let Some(reason) = warning {
+                return Err(reason);
+            }
             return Err(
                 "PawnIO is available. No supported ENE DDR4 RGB controller was found.".into(),
             );
         }
-        Ok(devices)
+        Ok((devices, warning))
     }
 
-    fn identify(bus: &Arc<Bus>, address: u8) -> Option<Self> {
+    fn resolve_default_address(
+        bus: &Arc<Bus>,
+        expected: usize,
+        devices: &mut Vec<Self>,
+    ) -> Result<(), String> {
+        // ENE DDR4 DIMMs can share 0x77 until the slot selector and volatile address are set.
+        // Only remap a controller after matching an ENE firmware and LED count at 0x77.
+        for slot in 0..8 {
+            if devices.len() >= expected || Self::identify(bus, DEFAULT_ENE_ADDRESS)?.is_none() {
+                break;
+            }
+            let mut free_address = None;
+            for address in 0x70..DEFAULT_ENE_ADDRESS {
+                if bus.address_available(address)? {
+                    free_address = Some(address);
+                    break;
+                }
+            }
+            let address = free_address.ok_or("No free SMBus address is available for the ENE module.")?;
+            bus.write_register(DEFAULT_ENE_ADDRESS, SLOT_SELECT, slot)?;
+            let write = bus.write_register(DEFAULT_ENE_ADDRESS, I2C_ADDRESS, address << 1);
+            // A controller can switch addresses before the original transaction finishes.
+            match Self::identify(bus, address) {
+                Ok(Some(module)) => devices.push(module),
+                other => {
+                    write?;
+                    other?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn identify(bus: &Arc<Bus>, address: u8) -> Result<Option<Self>, String> {
         // Check the read-only ENE signature before addressing its internal registers.
-        for value in 0..16 {
-            if bus.read_byte(address, 0xa0 + value).ok()? != value {
-                return None;
+        let mut first = [0; 5];
+        let result = bus.call_status(c"ioctl_smbus_xfer", &[address.into(), 1, 0xa0, BYTE_DATA], &mut first);
+        if result as u32 == NO_SUCH_DEVICE {
+            return Ok(None);
+        }
+        status(result, "SMBus")?;
+        if first[0] as u8 != 0 {
+            return Ok(None);
+        }
+        for value in 1..16 {
+            if bus.read_byte(address, 0xa0 + value)? != value {
+                return Ok(None);
             }
         }
         let signature = (0..16)
             .map(|offset| bus.read_register(address, 0x1000 + offset))
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        let signature = signature.split(|byte| *byte == 0).next()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        let signature = signature.split(|byte| *byte == 0).next().unwrap_or_default().trim_ascii_end();
         let (direct_register, max_leds) = match signature {
             b"AUDA0-E6K5-0101" => (0x8100, 10),
             b"DIMM_LED-0102" | b"DIMM_LED-0103" => (0x8000, 5),
-            _ => return None,
+            _ => return Ok(None),
         };
-        let leds = bus.read_register(address, 0x1c02).ok()?;
+        let leds = bus.read_register(address, 0x1c02)?;
         if !(1..=max_leds).contains(&leds) {
-            return None;
+            return Ok(None);
         }
         let device = Device {
             id: format!("dimm-ene-{address:02x}"),
             name: format!("ENE memory · {address:02X}"),
             detail: "AMD SMBus · PawnIO".into(),
             needs_pawnio_install: false,
+            needs_pawnio_elevation: false,
             zones: vec![Zone {
                 id: "dimm".into(),
                 name: "Module lighting".into(),
@@ -240,13 +318,13 @@ impl Dimm {
                 direct: true,
             }],
         };
-        Some(Self {
+        Ok(Some(Self {
             bus: Arc::clone(bus),
             device,
             address,
             direct_register,
             leds,
-        })
+        }))
     }
 
     fn pixels(&self, [red, green, blue]: Rgb) -> Result<(), String> {

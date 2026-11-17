@@ -53,6 +53,7 @@ impl Firmware {
                     detail,
                     zones: Vec::new(),
                     needs_pawnio_install: false,
+                    needs_pawnio_elevation: false,
                 }
             })
             .collect()

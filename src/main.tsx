@@ -1,8 +1,11 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
+import { isEnabled, enable, disable } from '@tauri-apps/plugin-autostart';
+import { useUpdates } from './useUpdates';
+import { version as appVersion } from '../package.json';
 import { Button, FluentProvider, webDarkTheme } from '@fluentui/react-components';
 import { listen } from '@tauri-apps/api/event';
-import { api, type ApplyResult, type Assignment, type Device, type Effect, type Profile, type RGB } from './api';
+import { api, type ApplyResult, type Assignment, type Device, type Effect, type ProfileLibrary, type RGB } from './api';
 import { localizeDiagnostic, messages, sceneName, type Language, type Messages } from './i18n';
 import { MatrixBackdrop } from './CanvasMatrix';
 import { Profiles } from './profiles';
@@ -16,6 +19,7 @@ const STATIC: Effect[] = [
 const SYNC: Effect[] = [
   { id: 'pulse', name: 'Pulse', color: true, brightness: true },
   { id: 'hue', name: 'Spectrum', color: false, brightness: true },
+  { id: 'sync-rainbow', name: 'Rainbow', color: false, brightness: true },
 ];
 
 type Notice = { label?: keyof Messages; message?: string; count?: number; issues: string[] };
@@ -29,9 +33,14 @@ function rgb(value: string): RGB {
 function App() {
   const [tab, setTab] = useState<Tab>('studio');
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem('vibergb.language') === 'ru' ? 'ru' : 'en');
+  const [autostart, setAutostart] = useState<boolean>();
+  const [background, setBackground] = useState(() => localStorage.getItem('vibergb.background') !== 'off');
+  const [autoCheck, setAutoCheck] = useState(() => localStorage.getItem('vibergb.autoCheck') !== 'off');
+  const updates = useUpdates(autoCheck);
   const [group, setGroup] = useState<Group>('sync');
   const [devices, setDevices] = useState<Device[]>([]);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [library, setLibrary] = useState<ProfileLibrary>({ profiles: [], startupId: null });
+  const revision = useRef(-1);
   const [active, setActive] = useState<Assignment[]>([]);
   const [deviceId, setDeviceId] = useState('');
   const [zoneId, setZoneId] = useState('');
@@ -45,6 +54,13 @@ function App() {
   const t = messages[language];
   const localize = (value: string) => localizeDiagnostic(value, language);
 
+  function acceptState(state: ApplyResult) {
+    if (state.revision < revision.current) return false;
+    revision.current = state.revision;
+    setActive(state.active);
+    return true;
+  }
+
   useEffect(() => {
     document.documentElement.lang = language;
     localStorage.setItem('vibergb.language', language);
@@ -54,19 +70,24 @@ function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    listen<string>('lighting-error', event => {
-      if (!disposed) setNotice({ message: event.payload, issues: [] });
+    const subscribed = listen<ApplyResult>('lighting-error', ({ payload }) => {
+      if (!disposed && acceptState(payload)) setNotice({ label: 'animationFailed', issues: payload.issues });
     }).then(stop => {
       if (disposed) stop();
       else unlisten = stop;
     }).catch(error => {
       if (!disposed) setNotice({ label: 'eventsFailed', issues: [String(error)] });
     });
-    Promise.allSettled([api.devices(), api.profiles()]).then(([hardware, saved]) => {
+    Promise.allSettled([subscribed.then(() => api.devices()), api.profiles(), isEnabled()]).then(([hardware, saved, launch]) => {
       if (disposed) return;
-      if (hardware.status === 'fulfilled') setDevices(hardware.value);
-      if (saved.status === 'fulfilled') setProfiles(saved.value);
-      const issues = [hardware, saved].flatMap(result => result.status === 'rejected' ? [String(result.reason)] : []);
+      if (hardware.status === 'fulfilled') {
+        setDevices(hardware.value.devices);
+        acceptState(hardware.value.state);
+      }
+      if (saved.status === 'fulfilled') setLibrary(saved.value);
+      if (launch.status === 'fulfilled') setAutostart(launch.value);
+      const issues = [hardware, saved, launch].flatMap(result => result.status === 'rejected' ? [String(result.reason)] : []);
+      if (hardware.status === 'fulfilled') issues.push(...hardware.value.state.issues);
       if (issues.length) setNotice({ label: 'loadFailed', issues });
       setPending(false);
     });
@@ -92,20 +113,22 @@ function App() {
   const adjustableSpeed = group === 'sync' && SYNC.some(effect => effect.id === mode?.id);
 
   async function run(action: () => Promise<void>) {
-    if (pending) return;
+    if (pending) return false;
     setPending(true);
     setNotice(undefined);
     try {
       await action();
+      return true;
     } catch (error) {
       setNotice({ label: 'failed', issues: [String(error)] });
+      return false;
     } finally {
       setPending(false);
     }
   }
 
   function showResult(result: ApplyResult, skipped: string[] = []) {
-    setActive(result.active);
+    if (!acceptState(result)) return;
     setNotice({
       label: result.count ? 'updated' : 'noUpdates',
       count: result.count || undefined,
@@ -134,13 +157,24 @@ function App() {
     setTab('studio');
   }
 
-  function refresh() {
+  async function refreshDevices() {
+    const { devices: found, state } = await api.devices(true);
+    if (acceptState(state) && state.issues.length) setNotice({ label: 'refreshIssues', issues: state.issues });
+    const current = found.find(item => item.id === deviceId);
+    if (deviceId && !current) selectDevice('');
+    else if (zoneId && !current?.zones.some(zone => zone.id === zoneId)) setZoneId('');
+    setDevices(found);
+  }
+
+  function installPawnio() {
     void run(async () => {
-      const found = await api.devices(true);
-      const current = found.find(item => item.id === deviceId);
-      if (deviceId && !current) selectDevice('');
-      else if (zoneId && !current?.zones.some(zone => zone.id === zoneId)) setZoneId('');
-      setDevices(found);
+      const result = await api.installPawnio();
+      if (result !== 'cancelled') await refreshDevices();
+      if (result === 'restartRequired') {
+        setNotice({ label: 'pawnioRestart', issues: [] });
+      } else if (result === 'installed') {
+        setNotice({ label: 'pawnioInstalled', issues: [] });
+      }
     });
   }
 
@@ -156,21 +190,21 @@ function App() {
 
   return <FluentProvider theme={webDarkTheme} className="app-provider">
     <div className="shell">
-      <MatrixBackdrop animate />
+      {background && <MatrixBackdrop animate />}
       <aside className="rail">
         <div className="brand"><span className="brand-mark" aria-hidden="true" />VibeRGB</div>
         <nav className="navigation" aria-label={t.sections}>
           {([['studio', '◉'], ['profiles', '◇'], ['settings', '⚙']] as const).map(([page, icon]) =>
             <button key={page} aria-current={tab === page ? 'page' : undefined} onClick={() => setTab(page)}>
-              <span className="nav-symbol" aria-hidden="true">{icon}</span>{t[page]}
+              <span className="nav-symbol" aria-hidden="true">{icon}</span>{t[page]}{page === 'settings' && updates.version && <span className="update-dot" aria-label={t.available} />}
             </button>)}
         </nav>
-        <div className="device-heading"><h2>{t.devices}</h2><Button size="small" appearance="subtle" disabled={pending} aria-label={t.refresh} title={t.refresh} onClick={refresh}>↻</Button></div>
+        <div className="device-heading"><h2>{t.devices}</h2><Button size="small" appearance="subtle" disabled={pending} aria-label={t.refresh} title={t.refresh} onClick={() => void run(refreshDevices)}>↻</Button></div>
         <div className="device-list">
-          <button className="device-row" aria-pressed={deviceId === ''} onClick={() => selectDevice('')}>
+          <button className="device-row" aria-pressed={tab === 'studio' && deviceId === ''} onClick={() => selectDevice('')}>
             <span className="device-icon" aria-hidden="true">◈</span><span><strong>{t.all}</strong><small>{t.active}: {connected.length}</small></span>
           </button>
-          {devices.map(item => <button key={item.id} className="device-row" aria-pressed={deviceId === item.id} onClick={() => selectDevice(item.id)}>
+          {devices.map(item => <button key={item.id} className="device-row" aria-pressed={tab === 'studio' && deviceId === item.id} onClick={() => selectDevice(item.id)}>
             <span className={item.zones.length ? 'device-icon available' : 'device-icon inactive'} aria-hidden="true">{item.id.startsWith('dimm') ? '▤' : '▣'}</span>
             <span><strong>{localize(item.name)}</strong><small>{item.zones.length ? `${t.zones}: ${item.zones.length}` : t.unavailable}</small></span>
           </button>)}
@@ -190,17 +224,68 @@ function App() {
             <div><strong>{notice.label ? t[notice.label] : localize(notice.message ?? '')}{notice.count ? `: ${notice.count}` : ''}</strong>{notice.issues.length > 0 && <ul>{notice.issues.map(issue => <li key={issue}>{localize(issue)}</li>)}</ul>}</div>
             <Button appearance="subtle" size="small" aria-label={t.dismiss} onClick={() => setNotice(undefined)}>×</Button>
           </div>}
-          {tab === 'settings' ? <section className="glass settings" aria-label={t.interface}>
-            <label className="zone-select">{t.language}
+          {tab === 'settings' ? <div className="settings">
+            <section className="glass settings-group">
+            <h2>{t.interface}</h2>
+            <label className="setting-row">{t.language}
               <select value={language} onChange={event => setLanguage(event.target.value === 'ru' ? 'ru' : 'en')}>
                 <option value="en" lang="en">English</option>
                 <option value="ru" lang="ru">Русский</option>
               </select>
             </label>
-          </section> : tab === 'profiles' ? <Profiles t={t} profiles={profiles} canSave={active.length > 0} pending={pending}
-            onSave={name => run(async () => { setProfiles(await api.save(name, active)); })}
-            onRename={(id, name) => run(async () => { setProfiles(await api.rename(id, name)); })}
-            onDelete={id => run(async () => { setProfiles(await api.delete(id)); })}
+            <label className="setting-row">{t.animatedBackground}
+              <input type="checkbox" role="switch" checked={background} onChange={event => {
+                const value = event.target.checked;
+                localStorage.setItem('vibergb.background', value ? 'on' : 'off');
+                setBackground(value);
+              }} />
+            </label>
+            </section>
+            <section className="glass settings-group">
+            <h2>{t.launch}</h2>
+            <label className="setting-row"><span>{t.loginStart}<small>{t.trayStart}</small></span>
+              <input type="checkbox" role="switch" checked={autostart ?? false} disabled={pending || autostart === undefined}
+                onChange={event => {
+                  const enabled = event.target.checked;
+                  void run(async () => {
+                    await (enabled ? enable() : disable());
+                    setAutostart(await isEnabled());
+                  });
+                }} />
+            </label>
+            <label className="setting-row">{t.startupProfile}
+              <select value={library.startupId ?? ''} disabled={pending} onChange={event => {
+                const id = event.target.value || null;
+                void run(async () => setLibrary(await api.startup(id)));
+              }}>
+                <option value="">{t.noStartup}</option>
+                {library.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+              </select>
+            </label>
+            </section>
+            <section className="glass settings-group">
+              <h2>{t.updates} <small>v{appVersion}</small></h2>
+              <label className="setting-row">{t.autoCheck}
+                <input type="checkbox" role="switch" checked={autoCheck} onChange={event => {
+                  const value = event.target.checked;
+                  localStorage.setItem('vibergb.autoCheck', value ? 'on' : 'off');
+                  setAutoCheck(value);
+                }} />
+              </label>
+              <div className="setting-row" role="status">
+                <span>{t[updates.status]} {updates.version}{updates.status === 'installing' && updates.percent !== undefined && ` · ${updates.percent}%`}
+                  {updates.error && <small>{updates.error}</small>}
+                </span>
+                {updates.status === 'available'
+                  ? <Button appearance="primary" className="primary-action" onClick={updates.install}>{t.installUpdate}</Button>
+                  : <Button disabled={updates.status === 'checking' || updates.status === 'installing'} onClick={updates.checkNow}>{t.checkUpdate}</Button>}
+              </div>
+            </section>
+          </div> : tab === 'profiles' ? <Profiles t={t} profiles={library.profiles} canSave={active.length > 0} pending={pending}
+            onSave={name => run(async () => { setLibrary(await api.save(name)); })}
+            onReplace={id => run(async () => setLibrary(await api.replace(id)))}
+            onRename={(id, name) => run(async () => { setLibrary(await api.rename(id, name)); })}
+            onDelete={id => run(async () => { setLibrary(await api.delete(id)); })}
             onApply={id => run(async () => showResult(await api.applyProfile(id)))} /> :
           <div className="studio">
             <section className="preview glass" style={previewStyle} aria-label={t.preview}>
@@ -226,7 +311,16 @@ function App() {
                   {device.zones.map(zone => <option key={zone.id} value={zone.id}>{localize(zone.name)}</option>)}
                 </select>
               </label>}
-              {unavailable ? <p className="muted">{localize(device.detail)}</p> : <>
+              {unavailable ? <>
+                <p className="muted">{localize(device.detail)}</p>
+                {device.needsPawnioInstall && <Button className="primary-action" appearance="primary" disabled={pending} onClick={installPawnio}>
+                  {t.installPawnio}
+                </Button>}
+                {device.needsPawnioElevation && <Button className="primary-action" appearance="primary" disabled={pending}
+                  onClick={() => void run(api.restartForRgbMemory)}>
+                  {t.restartAsAdmin}
+                </Button>}
+              </> : <>
                 <div key={group} className="choice-grid page-enter" aria-label={t.effect}>
                   {modes.map(item => <button key={item.id} className="choice" aria-pressed={mode?.id === item.id}
                     onClick={() => (group === 'sync' ? setScene : setHardwareEffect)(item.id)}>{sceneName(item.id, item.name, t)}</button>)}
@@ -258,7 +352,7 @@ function App() {
                 </div>}
                 {!entries.length && <p className="muted">{pending ? t.scanning : t.noZones}</p>}
                 {!!entries.length && !eligible.length && <p className="muted">{t.unsupported}</p>}
-                <Button className="apply-button" appearance="primary" disabled={pending || !eligible.length || (mode?.color && !validColor)}
+                <Button className="apply-button primary-action" appearance="primary" disabled={pending || !eligible.length || (mode?.color && !validColor)}
                   onClick={apply}>{t.apply}</Button>
               </>}
             </section>

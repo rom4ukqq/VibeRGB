@@ -19,7 +19,22 @@ pub struct Profile {
 #[derive(Default, Deserialize, Serialize)]
 struct FileContents {
     next_id: u64,
+    #[serde(default)]
+    startup_id: Option<String>,
     profiles: Vec<Profile>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileLibrary {
+    profiles: Vec<Profile>,
+    startup_id: Option<String>,
+}
+
+impl From<FileContents> for ProfileLibrary {
+    fn from(file: FileContents) -> Self {
+        Self { profiles: file.profiles, startup_id: file.startup_id }
+    }
 }
 
 pub struct Profiles(Mutex<PathBuf>);
@@ -29,12 +44,46 @@ impl Profiles {
         Self(Mutex::new(path))
     }
 
-    pub fn list(&self) -> Result<Vec<Profile>, String> {
+    pub fn list(&self) -> Result<ProfileLibrary, String> {
         let path = self.0.lock().map_err(|error| error.to_string())?;
-        Ok(read(&path)?.profiles)
+        Ok(read(&path)?.into())
     }
 
-    pub fn save(&self, name: String, assignments: Vec<Assignment>) -> Result<Vec<Profile>, String> {
+    pub fn assignments(&self, id: &str) -> Result<Vec<Assignment>, String> {
+        self.list()?.profiles.into_iter().find(|profile| profile.id == id)
+            .map(|profile| profile.assignments).ok_or_else(|| "Profile not found.".into())
+    }
+
+    pub fn startup(&self) -> Result<Option<Vec<Assignment>>, String> {
+        let library = self.list()?;
+        let Some(id) = library.startup_id else { return Ok(None) };
+        library.profiles.into_iter().find(|profile| profile.id == id)
+            .map(|profile| Some(profile.assignments)).ok_or_else(|| "Profile not found.".into())
+    }
+
+    pub fn set_startup(&self, id: Option<String>) -> Result<ProfileLibrary, String> {
+        self.edit(|file| {
+            if id.as_ref().is_some_and(|id| !file.profiles.iter().any(|p| &p.id == id)) {
+                return Err("Profile not found.".into());
+            }
+            file.startup_id = id;
+            Ok(())
+        })
+    }
+
+    pub fn replace(&self, id: &str, assignments: Vec<Assignment>) -> Result<ProfileLibrary, String> {
+        if assignments.is_empty() {
+            return Err("Apply lighting to at least one zone first.".into());
+        }
+        self.edit(|file| {
+            let profile = file.profiles.iter_mut().find(|profile| profile.id == id)
+                .ok_or("Profile not found.")?;
+            profile.assignments = assignments;
+            Ok(())
+        })
+    }
+
+    pub fn save(&self, name: String, assignments: Vec<Assignment>) -> Result<ProfileLibrary, String> {
         if assignments.is_empty() {
             return Err("Apply lighting to at least one zone first.".into());
         }
@@ -53,7 +102,7 @@ impl Profiles {
         })
     }
 
-    pub fn rename(&self, id: &str, name: String) -> Result<Vec<Profile>, String> {
+    pub fn rename(&self, id: &str, name: String) -> Result<ProfileLibrary, String> {
         let name = normalized_name(&name)?;
         self.edit(move |file| {
             let profile = file
@@ -66,7 +115,7 @@ impl Profiles {
         })
     }
 
-    pub fn delete(&self, id: &str) -> Result<Vec<Profile>, String> {
+    pub fn delete(&self, id: &str) -> Result<ProfileLibrary, String> {
         self.edit(|file| {
             let index = file
                 .profiles
@@ -74,6 +123,9 @@ impl Profiles {
                 .position(|profile| profile.id == id)
                 .ok_or("Profile not found.")?;
             file.profiles.remove(index);
+            if file.startup_id.as_deref() == Some(id) {
+                file.startup_id = None;
+            }
             Ok(())
         })
     }
@@ -81,7 +133,7 @@ impl Profiles {
     fn edit(
         &self,
         change: impl FnOnce(&mut FileContents) -> Result<(), String>,
-    ) -> Result<Vec<Profile>, String> {
+    ) -> Result<ProfileLibrary, String> {
         let path = self.0.lock().map_err(|error| error.to_string())?;
         let mut file = read(&path)?;
         change(&mut file)?;
@@ -93,7 +145,7 @@ impl Profiles {
         serde_json::to_writer_pretty(temporary.as_file_mut(), &file).map_err(profile_error)?;
         temporary.as_file().sync_all().map_err(profile_error)?;
         temporary.persist(path.as_path()).map_err(profile_error)?;
-        Ok(file.profiles)
+        Ok(file.into())
     }
 }
 
