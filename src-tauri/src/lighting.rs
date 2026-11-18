@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::hardware::{dim, Device, Frame, Hardware, Rgb};
+use crate::hardware::{dim, Device, Hardware, Rgb};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const COLOR_CYCLE_SECONDS: f64 = 6.0;
@@ -118,25 +118,14 @@ struct Animation {
     base: Rgb,
     brightness: u8,
     speed: f64,
-    led_count: usize,
-    last: Option<Frame>,
+    last: Option<Rgb>,
 }
 
 impl Animation {
-    fn frame(&self, phase: f64) -> Frame {
-        let seconds = phase * self.speed;
-        let color = |time| dim(self.kind.color(self.base, time), self.brightness);
-        if self.led_count == 1 {
-            return Frame::Solid(color(seconds));
-        }
-        let period = match self.kind {
-            AnimationKind::GtaVi(_) => 2.0 * COLOR_CYCLE_SECONDS,
-            _ => COLOR_CYCLE_SECONDS,
-        };
-        Frame::Pixels(
-            (0..self.led_count)
-                .map(|index| color(seconds + period * index as f64 / self.led_count as f64))
-                .collect(),
+    fn frame(&self, phase: f64) -> Rgb {
+        dim(
+            self.kind.color(self.base, phase * self.speed),
+            self.brightness,
         )
     }
 }
@@ -182,15 +171,18 @@ impl AnimationKind {
                 cycle_color(&COLORS, seconds + offset)
             }
             Self::GtaVi(offset) => {
-                const SUNSET: [Rgb; 6] = [
-                    [111, 57, 232],
-                    [206, 62, 224],
-                    [255, 86, 155],
-                    [255, 163, 74],
-                    [255, 86, 155],
-                    [206, 62, 224],
+                const SUNSET: [Rgb; 8] = [
+                    [74, 55, 255],
+                    [125, 25, 234],
+                    [194, 25, 193],
+                    [239, 80, 128],
+                    [255, 165, 66],
+                    [239, 80, 128],
+                    [194, 25, 193],
+                    [125, 25, 234],
                 ];
-                cycle_color(&SUNSET, seconds / 2.0 + offset)
+                let phase = (seconds / 2.0 + offset) / COLOR_CYCLE_SECONDS;
+                cycle_color(&SUNSET, phase * SUNSET.len() as f64)
             }
         }
     }
@@ -383,12 +375,6 @@ impl Worker {
             }
             let base = assignment.color;
             let speed = f64::from(assignment.speed.clamp(25, 250)) / 100.0;
-            let led_count = match kind {
-                AnimationKind::Rainbow(_) | AnimationKind::GtaVi(_) => {
-                    controller.animation_led_count(&target.zone_id)
-                }
-                _ => 1,
-            };
             if !self.animations.contains_key(target) {
                 let initial = dim(
                     kind.color(base, self.epoch.elapsed().as_secs_f64() * speed),
@@ -403,7 +389,6 @@ impl Worker {
                     base,
                     brightness,
                     speed,
-                    led_count,
                     last: None,
                 },
             );
@@ -443,10 +428,10 @@ impl Worker {
 
     fn frame(&mut self, now: Instant) -> Vec<String> {
         let phase = now.duration_since(self.epoch).as_secs_f64();
-        let mut batches: BTreeMap<String, Vec<(Target, Frame)>> = BTreeMap::new();
+        let mut batches: BTreeMap<String, Vec<(Target, Rgb)>> = BTreeMap::new();
         for (target, animation) in &self.animations {
             let frame = animation.frame(phase);
-            if Some(&frame) != animation.last.as_ref() {
+            if Some(frame) != animation.last {
                 batches
                     .entry(target.device_id.clone())
                     .or_default()
@@ -465,7 +450,7 @@ impl Worker {
                         scope.spawn(move || {
                             let updates: Vec<_> = batch
                                 .iter()
-                                .map(|(target, frame)| (target.zone_id.as_str(), frame))
+                                .map(|(target, frame)| (target.zone_id.as_str(), *frame))
                                 .collect();
                             let result = controller.frames(&updates);
                             (batch, result)

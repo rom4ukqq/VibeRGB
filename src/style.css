@@ -137,7 +137,7 @@ h1 { font-size: clamp(32px, 4vw, 49px); letter-spacing: -.058em; line-height: 1.
 }
 .render-gta-vi .orb {
   background: radial-gradient(ellipse at 31% 19%, #fffe, transparent 35%),
-    linear-gradient(120deg, #6f39e8, #ce3ee0, #ff569b, #ffa34a, #ff569b, #ce3ee0, #6f39e8);
+    linear-gradient(128deg, #4a37ff, #7d19ea, #c219c1, #ef5080, #ffa542, #ef5080, #c219c1, #7d19ea, #4a37ff);
   background-size: 100% 100%, 240% 100%;
   animation: sunset var(--cycle, 12s) ease-in-out infinite;
 }

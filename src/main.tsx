@@ -179,7 +179,7 @@ function App() {
     });
   }
 
-  const previewColor = mode?.id === 'gta-vi' ? '#ff569b' : mode?.color && validColor ? color : PALETTE[0];
+  const previewColor = mode?.id === 'gta-vi' ? '#c219c1' : mode?.color && validColor ? color : PALETTE[0];
   const cycleSeconds = mode?.id === 'pulse' ? 4 : mode?.id === 'gta-vi' ? 12 : 6;
   const previewStyle = {
     '--scene-color': previewColor,

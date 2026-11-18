@@ -26,10 +26,11 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{dim, smbios::Firmware, Controller, Device, Effect, Frame, Rgb, Zone};
+use super::{dim, smbios::Firmware, Controller, Device, Effect, Rgb, Zone};
 
 pub const BOARD_ID: &str = "asrock-b550m-pro4";
 pub const BOARD_NAME: &str = "ASRock B550M Pro4";
+const MODE_STATIC: u8 = 0x01;
 const ZONES: [&str; 8] = [
     "RGB LED 1",
     "RGB LED 2",
@@ -65,10 +66,6 @@ pub struct Board {
     hid: File,
     device: Device,
     red_green_order: u8,
-    zone_mask: u8,
-    led_counts: [usize; 8],
-    direct_colors: [Frame; 8],
-    direct_zones: u8,
 }
 
 impl Board {
@@ -80,21 +77,16 @@ impl Board {
         let availability = read_configuration(&hid, 1)?[0];
         let counts = read_configuration(&hid, 2)?;
         let red_green_order = read_configuration(&hid, 3)?[0];
-        let mut led_counts = [0; 8];
-        let mut zone_mask = 0;
         let zones = ZONES
             .iter()
             .enumerate()
             .filter(|(channel, _)| availability & (1 << channel) != 0 && counts[*channel] != 0x1e)
             .map(|(channel, name)| {
-                let count = usize::from(counts[channel]);
-                led_counts[channel] = if count <= 100 { count } else { 0 };
-                zone_mask |= 1 << channel;
                 Zone {
                     id: channel.to_string(),
                     name: (*name).into(),
                     effects: EFFECTS.to_vec(),
-                    direct: led_counts[channel] > 0,
+                    direct: matches!(counts[channel], 1..=100),
                 }
             })
             .collect::<Vec<_>>();
@@ -113,10 +105,6 @@ impl Board {
             hid,
             device,
             red_green_order,
-            zone_mask,
-            led_counts,
-            direct_colors: std::array::from_fn(|_| Frame::Solid([0; 3])),
-            direct_zones: 0,
         })
     }
 
@@ -134,68 +122,6 @@ impl Board {
         report[1] = 0x10;
         report[3..10].copy_from_slice(&[channel as u8, mode, first, second, blue, 0xe0, 0xff]);
         exchange(&self.hid, &report).map(|_| ())
-    }
-
-    fn write_frame(&self) -> Result<(), String> {
-        // The hardware consumes one packed RGB buffer for every channel in Direct mode.
-        // The first report holds 18 pixels and continuations hold 19. There is no flash commit.
-        let mut payload = Vec::new();
-        let mut capacity = 8;
-        for (channel, &count) in self.led_counts.iter().enumerate() {
-            for index in 0..count {
-                let color = self.channel_color(channel, self.direct_colors[channel].color_at(index));
-                payload.extend_from_slice(&color);
-            }
-            if self.zone_mask & (1 << channel) != 0 {
-                capacity += if matches!(channel, 2 | 3 | 7) {
-                    100
-                } else {
-                    count
-                };
-            }
-        }
-        payload.resize(capacity * 3, 0);
-        let (first, rest) = payload.split_at(payload.len().min(54));
-        let mut report = [0; 65];
-        report[1] = 0x10;
-        report[3] = 0xff;
-        report[4] = 0xe3;
-        report[7] = 0xff;
-        report[9..9 + first.len()].copy_from_slice(first);
-        report[64] = 0x65;
-        exchange(&self.hid, &report)?;
-        for chunk in rest.chunks(57) {
-            let mut report = [0; 65];
-            report[1] = 0x10;
-            report[3] = 0xff;
-            report[4] = 0xe4;
-            report[5..5 + chunk.len()].copy_from_slice(chunk);
-            report[64] = 0x65;
-            exchange(&self.hid, &report)?;
-        }
-        Ok(())
-    }
-
-    fn set_direct_zones(&mut self, zones: u8) -> Result<(), String> {
-        if self.red_green_order != 0 && (zones == 0) != (self.direct_zones == 0) {
-            // Polychrome Direct frames are board-wide. A swap bit on another
-            // channel can still cause flashing, so clear the whole mask.
-            // Keep the original channel order for encoding colors.
-            let mask = if zones == 0 { self.red_green_order } else { 0 };
-            let mut report = [0; 65];
-            report[1] = 0x15;
-            report[3] = 3;
-            report[4] = mask;
-            exchange(&self.hid, &report)?;
-        }
-        self.direct_zones = zones;
-        Ok(())
-    }
-}
-
-impl Drop for Board {
-    fn drop(&mut self) {
-        let _ = self.set_direct_zones(0);
     }
 }
 
@@ -215,51 +141,19 @@ impl Controller for Board {
         let channel = channel(zone)?;
         let mode = match (mode, brightness) {
             ("off", _) | (_, 0) => 0x00,
-            ("solid", _) => 0x01,
+            ("solid", _) => MODE_STATIC,
             ("breathing", _) => 0x02,
             ("spectrum", _) => 0x04,
             ("rainbow", _) => 0x0e,
             _ => return Err("Mode unavailable on Polychrome.".into()),
         };
-        let previous = self.direct_zones;
-        self.set_direct_zones(previous & !(1 << channel))?;
-        if let Err(error) = self.write_mode(channel, mode, dim(color, brightness)) {
-            let _ = self.set_direct_zones(previous);
-            return Err(error);
-        }
-        self.direct_colors[channel] = Frame::Solid([0; 3]);
-        Ok(())
-    }
-
-    fn begin_animation(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
-        let channel = channel(zone)?;
-        let previous = self.direct_zones;
-        self.set_direct_zones(previous | (1 << channel))?;
-        if let Err(error) = self.write_mode(channel, 0x0f, color) {
-            let _ = self.set_direct_zones(previous);
-            return Err(error);
-        }
-        self.direct_colors[channel] = Frame::Solid(color);
-        Ok(())
+        self.write_mode(channel, mode, dim(color, brightness))
     }
 
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
-        self.direct_colors[channel(zone)?] = Frame::Solid(color);
-        self.write_frame()
-    }
-
-    fn animation_led_count(&self, zone: &str) -> usize {
-        match channel(zone) {
-            Ok(channel @ (2 | 3 | 7)) => self.led_counts[channel].max(1),
-            _ => 1,
-        }
-    }
-
-    fn frames(&mut self, updates: &[(&str, &Frame)]) -> Result<Vec<(String, String)>, String> {
-        for &(zone, frame) in updates {
-            self.direct_colors[channel(zone)?] = frame.clone();
-        }
-        self.write_frame().map(|_| Vec::new())
+        // B550M Pro4 can flash in per-LED Direct mode. Stream the same
+        // per-zone static-color command that the Color preset uses.
+        self.write_mode(channel(zone)?, MODE_STATIC, color)
     }
 }
 
