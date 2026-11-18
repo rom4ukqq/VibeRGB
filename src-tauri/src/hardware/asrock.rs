@@ -26,7 +26,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{dim, smbios::Firmware, Controller, Device, Effect, Rgb, Zone};
+use super::{dim, smbios::Firmware, Controller, Device, Effect, Frame, Rgb, Zone};
 
 pub const BOARD_ID: &str = "asrock-b550m-pro4";
 pub const BOARD_NAME: &str = "ASRock B550M Pro4";
@@ -67,7 +67,7 @@ pub struct Board {
     red_green_order: u8,
     zone_mask: u8,
     led_counts: [usize; 8],
-    direct_colors: [Rgb; 8],
+    direct_colors: [Frame; 8],
     direct_zones: u8,
 }
 
@@ -115,7 +115,7 @@ impl Board {
             red_green_order,
             zone_mask,
             led_counts,
-            direct_colors: [[0; 3]; 8],
+            direct_colors: std::array::from_fn(|_| Frame::Solid([0; 3])),
             direct_zones: 0,
         })
     }
@@ -142,8 +142,8 @@ impl Board {
         let mut payload = Vec::new();
         let mut capacity = 8;
         for (channel, &count) in self.led_counts.iter().enumerate() {
-            let color = self.channel_color(channel, self.direct_colors[channel]);
-            for _ in 0..count {
+            for index in 0..count {
+                let color = self.channel_color(channel, self.direct_colors[channel].color_at(index));
                 payload.extend_from_slice(&color);
             }
             if self.zone_mask & (1 << channel) != 0 {
@@ -177,10 +177,11 @@ impl Board {
     }
 
     fn set_direct_zones(&mut self, zones: u8) -> Result<(), String> {
-        let mask = self.red_green_order & !zones;
-        if mask != self.red_green_order & !self.direct_zones {
-            // Polychrome can flash on every Direct update while hardware R/G swap is enabled.
-            // Adjust only animated channels and restore their saved mask when they leave Direct.
+        if self.red_green_order != 0 && (zones == 0) != (self.direct_zones == 0) {
+            // Polychrome Direct frames are board-wide. A swap bit on another
+            // channel can still cause flashing, so clear the whole mask.
+            // Keep the original channel order for encoding colors.
+            let mask = if zones == 0 { self.red_green_order } else { 0 };
             let mut report = [0; 65];
             report[1] = 0x15;
             report[3] = 3;
@@ -226,7 +227,7 @@ impl Controller for Board {
             let _ = self.set_direct_zones(previous);
             return Err(error);
         }
-        self.direct_colors[channel] = [0; 3];
+        self.direct_colors[channel] = Frame::Solid([0; 3]);
         Ok(())
     }
 
@@ -238,17 +239,25 @@ impl Controller for Board {
             let _ = self.set_direct_zones(previous);
             return Err(error);
         }
-        self.direct_colors[channel] = color;
+        self.direct_colors[channel] = Frame::Solid(color);
         Ok(())
     }
 
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
-        self.frames(&[(zone, color)]).map(|_| ())
+        self.direct_colors[channel(zone)?] = Frame::Solid(color);
+        self.write_frame()
     }
 
-    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
-        for &(zone, color) in updates {
-            self.direct_colors[channel(zone)?] = color;
+    fn animation_led_count(&self, zone: &str) -> usize {
+        match channel(zone) {
+            Ok(channel @ (2 | 3 | 7)) => self.led_counts[channel].max(1),
+            _ => 1,
+        }
+    }
+
+    fn frames(&mut self, updates: &[(&str, &Frame)]) -> Result<Vec<(String, String)>, String> {
+        for &(zone, frame) in updates {
+            self.direct_colors[channel(zone)?] = frame.clone();
         }
         self.write_frame().map(|_| Vec::new())
     }

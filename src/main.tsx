@@ -20,6 +20,7 @@ const SYNC: Effect[] = [
   { id: 'pulse', name: 'Pulse', color: true, brightness: true },
   { id: 'hue', name: 'Spectrum', color: false, brightness: true },
   { id: 'sync-rainbow', name: 'Rainbow', color: false, brightness: true },
+  { id: 'gta-vi', name: 'GTA VI', color: false, brightness: true },
 ];
 
 type Notice = { label?: keyof Messages; message?: string; count?: number; issues: string[] };
@@ -178,11 +179,12 @@ function App() {
     });
   }
 
-  const previewColor = mode?.color && validColor ? color : PALETTE[0];
+  const previewColor = mode?.id === 'gta-vi' ? '#ff569b' : mode?.color && validColor ? color : PALETTE[0];
+  const cycleSeconds = mode?.id === 'pulse' ? 4 : mode?.id === 'gta-vi' ? 12 : 6;
   const previewStyle = {
     '--scene-color': previewColor,
     '--level': mode?.id === 'off' ? 0 : dimmable ? brightness / 100 : 1,
-    '--cycle': `${(mode?.id === 'pulse' ? 4 : 6) * (adjustableSpeed ? 100 / speed : 1)}s`,
+    '--cycle': `${cycleSeconds * (adjustableSpeed ? 100 / speed : 1)}s`,
   } as CSSProperties;
   const unavailable = device && !device.zones.length;
   const brightnessPartial = group === 'hardware' && dimmable && eligible.some(({ zone }) =>

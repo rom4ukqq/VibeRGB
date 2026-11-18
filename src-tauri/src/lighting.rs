@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::hardware::{dim, Device, Hardware, Rgb};
+use crate::hardware::{dim, Device, Frame, Hardware, Rgb};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const COLOR_CYCLE_SECONDS: f64 = 6.0;
@@ -118,7 +118,27 @@ struct Animation {
     base: Rgb,
     brightness: u8,
     speed: f64,
-    last: Option<Rgb>,
+    led_count: usize,
+    last: Option<Frame>,
+}
+
+impl Animation {
+    fn frame(&self, phase: f64) -> Frame {
+        let seconds = phase * self.speed;
+        let color = |time| dim(self.kind.color(self.base, time), self.brightness);
+        if self.led_count == 1 {
+            return Frame::Solid(color(seconds));
+        }
+        let period = match self.kind {
+            AnimationKind::GtaVi(_) => 2.0 * COLOR_CYCLE_SECONDS,
+            _ => COLOR_CYCLE_SECONDS,
+        };
+        Frame::Pixels(
+            (0..self.led_count)
+                .map(|index| color(seconds + period * index as f64 / self.led_count as f64))
+                .collect(),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +146,7 @@ enum AnimationKind {
     Pulse,
     Hue,
     Rainbow(f64),
+    GtaVi(f64),
 }
 
 impl AnimationKind {
@@ -134,6 +155,7 @@ impl AnimationKind {
             "pulse" => Some(Self::Pulse),
             "hue" => Some(Self::Hue),
             "sync-rainbow" => Some(Self::Rainbow(0.0)),
+            "gta-vi" => Some(Self::GtaVi(0.0)),
             _ => None,
         }
     }
@@ -157,17 +179,32 @@ impl AnimationKind {
                     Self::Rainbow(offset) => offset,
                     _ => 0.0,
                 };
-                let position = (seconds + offset).rem_euclid(COLOR_CYCLE_SECONDS);
-                let index = position.floor() as usize;
-                let start = COLORS[index];
-                let end = COLORS[(index + 1) % COLORS.len()];
-                std::array::from_fn(|channel| {
-                    let first = f64::from(start[channel]);
-                    (first + (f64::from(end[channel]) - first) * position.fract()).round() as u8
-                })
+                cycle_color(&COLORS, seconds + offset)
+            }
+            Self::GtaVi(offset) => {
+                const SUNSET: [Rgb; 6] = [
+                    [111, 57, 232],
+                    [206, 62, 224],
+                    [255, 86, 155],
+                    [255, 163, 74],
+                    [255, 86, 155],
+                    [206, 62, 224],
+                ];
+                cycle_color(&SUNSET, seconds / 2.0 + offset)
             }
         }
     }
+}
+
+fn cycle_color(colors: &[Rgb], position: f64) -> Rgb {
+    let position = position.rem_euclid(colors.len() as f64);
+    let index = position.floor() as usize;
+    let start = colors[index];
+    let end = colors[(index + 1) % colors.len()];
+    std::array::from_fn(|channel| {
+        let first = f64::from(start[channel]);
+        (first + (f64::from(end[channel]) - first) * position.fract()).round() as u8
+    })
 }
 
 struct Worker {
@@ -322,7 +359,10 @@ impl Worker {
         let mode = assignment.mode.as_str();
         let animation = match AnimationKind::from_mode(mode) {
             Some(AnimationKind::Rainbow(_)) => {
-                Some(AnimationKind::Rainbow(self.rainbow_offset(target)))
+                Some(AnimationKind::Rainbow(self.zone_phase_offset(target)))
+            }
+            Some(AnimationKind::GtaVi(_)) => {
+                Some(AnimationKind::GtaVi(self.zone_phase_offset(target)))
             }
             other => other,
         };
@@ -343,6 +383,12 @@ impl Worker {
             }
             let base = assignment.color;
             let speed = f64::from(assignment.speed.clamp(25, 250)) / 100.0;
+            let led_count = match kind {
+                AnimationKind::Rainbow(_) | AnimationKind::GtaVi(_) => {
+                    controller.animation_led_count(&target.zone_id)
+                }
+                _ => 1,
+            };
             if !self.animations.contains_key(target) {
                 let initial = dim(
                     kind.color(base, self.epoch.elapsed().as_secs_f64() * speed),
@@ -357,6 +403,7 @@ impl Worker {
                     base,
                     brightness,
                     speed,
+                    led_count,
                     last: None,
                 },
             );
@@ -371,7 +418,7 @@ impl Worker {
         Ok(())
     }
 
-    fn rainbow_offset(&self, target: &Target) -> f64 {
+    fn zone_phase_offset(&self, target: &Target) -> f64 {
         // Use the device layout so changing one target doesn't move the others.
         let zones: Vec<_> = self
             .hardware
@@ -396,19 +443,14 @@ impl Worker {
 
     fn frame(&mut self, now: Instant) -> Vec<String> {
         let phase = now.duration_since(self.epoch).as_secs_f64();
-        let mut batches: BTreeMap<String, Vec<(Target, Rgb)>> = BTreeMap::new();
+        let mut batches: BTreeMap<String, Vec<(Target, Frame)>> = BTreeMap::new();
         for (target, animation) in &self.animations {
-            let color = dim(
-                animation
-                    .kind
-                    .color(animation.base, phase * animation.speed),
-                animation.brightness,
-            );
-            if Some(color) != animation.last {
+            let frame = animation.frame(phase);
+            if Some(&frame) != animation.last.as_ref() {
                 batches
                     .entry(target.device_id.clone())
                     .or_default()
-                    .push((target.clone(), color));
+                    .push((target.clone(), frame));
             }
         }
         // Start each transport concurrently for the same sampled phase. Wait for
@@ -423,7 +465,7 @@ impl Worker {
                         scope.spawn(move || {
                             let updates: Vec<_> = batch
                                 .iter()
-                                .map(|(target, color)| (target.zone_id.as_str(), *color))
+                                .map(|(target, frame)| (target.zone_id.as_str(), frame))
                                 .collect();
                             let result = controller.frames(&updates);
                             (batch, result)
@@ -450,9 +492,9 @@ impl Worker {
                         self.animations.remove(&target);
                         self.active.remove(&target);
                     }
-                    for (target, color) in batch {
+                    for (target, frame) in batch {
                         if let Some(animation) = self.animations.get_mut(&target) {
-                            animation.last = Some(color);
+                            animation.last = Some(frame);
                         }
                     }
                 }

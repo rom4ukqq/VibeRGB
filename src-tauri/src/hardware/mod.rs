@@ -13,6 +13,21 @@ use serde::Serialize;
 
 pub type Rgb = [u8; 3];
 
+#[derive(Clone, PartialEq)]
+pub enum Frame {
+    Solid(Rgb),
+    Pixels(Vec<Rgb>),
+}
+
+impl Frame {
+    pub fn color_at(&self, index: usize) -> Rgb {
+        match self {
+            Self::Solid(color) => *color,
+            Self::Pixels(colors) => colors[index],
+        }
+    }
+}
+
 pub fn dim(color: Rgb, brightness: u8) -> Rgb {
     color.map(|channel| ((u16::from(channel) * u16::from(brightness.min(100)) + 50) / 100) as u8)
 }
@@ -53,10 +68,13 @@ pub trait Controller: Send {
         self.apply(zone, "solid", color, 100)
     }
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String>;
-    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
+    fn animation_led_count(&self, _zone: &str) -> usize {
+        1
+    }
+    fn frames(&mut self, updates: &[(&str, &Frame)]) -> Result<Vec<(String, String)>, String> {
         let mut failures = Vec::new();
-        for &(zone, color) in updates {
-            if let Err(error) = self.frame(zone, color) {
+        for &(zone, frame) in updates {
+            if let Err(error) = self.frame(zone, frame.color_at(0)) {
                 failures.push((zone.to_owned(), error));
             }
         }

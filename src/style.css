@@ -135,6 +135,13 @@ h1 { font-size: clamp(32px, 4vw, 49px); letter-spacing: -.058em; line-height: 1.
     conic-gradient(from -25deg, #fb7397, #ffc77a, #ace892, #67dcea, #888bff, #e292f5, #fb7397);
   animation: hue var(--cycle, 6s) linear infinite;
 }
+.render-gta-vi .orb {
+  background: radial-gradient(ellipse at 31% 19%, #fffe, transparent 35%),
+    linear-gradient(120deg, #6f39e8, #ce3ee0, #ff569b, #ffa34a, #ff569b, #ce3ee0, #6f39e8);
+  background-size: 100% 100%, 240% 100%;
+  animation: sunset var(--cycle, 12s) ease-in-out infinite;
+}
+@keyframes sunset { 50% { background-position: 0 0, 100% 0; } }
 @keyframes pulse { 0%, 100% { scale: .94; opacity: calc(.15 + var(--level) * .30); } 50% { scale: 1.04; opacity: calc(.15 + var(--level) * .85); } }
 @keyframes hue { to { filter: hue-rotate(360deg) brightness(calc(.3 + var(--level) * .7)) saturate(1.18); } }
 .preview-caption { display: flex; gap: 9px; align-items: center; justify-content: space-between; padding: 11px 13px; border: 1px solid #e1d5ff24; border-radius: 13px; background: #f3e5ff10; min-width: 0; }
