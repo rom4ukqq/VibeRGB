@@ -16,8 +16,9 @@ pub const GPU_ID: &str = "msi-4070-super-mlg";
 pub const GPU_NAME: &str = "MSI RTX 4070 SUPER Gaming X Slim MLG";
 const NVIDIA_DEVICE: u32 = 0x2783_10de;
 const MSI_SUBSYSTEM: u32 = 0xe134_1462;
-const RGB_MODE: u8 = 0x13;
 const MODE_REGISTER: u8 = 0x22;
+const MODE_IDLE: u8 = 0x1c;
+const MODE_STATIC: u8 = 0x13;
 const EFFECTS: [Effect; 2] = [
     Effect {
         id: "breathing",
@@ -231,6 +232,11 @@ impl Gpu {
         self.write(0x31, &mut [green])?;
         self.write(0x32, &mut [blue])
     }
+
+    fn prepare_mode(&self) -> Result<(), String> {
+        self.write(0x2e, &mut [0])?;
+        self.write(MODE_REGISTER, &mut [MODE_IDLE])
+    }
 }
 
 impl Controller for Gpu {
@@ -240,13 +246,12 @@ impl Controller for Gpu {
 
     fn apply(&mut self, _zone: &str, mode: &str, color: Rgb, brightness: u8) -> Result<(), String> {
         let mode = if brightness == 0 { "off" } else { mode };
-        self.write(0x2e, &mut [0])?;
-        self.write(MODE_REGISTER, &mut [0x1c])?;
+        self.prepare_mode()?;
         let value = match mode {
             "off" => 0x01,
             "solid" => {
                 self.color(dim(color, brightness))?;
-                RGB_MODE
+                MODE_STATIC
             }
             "rainbow" => {
                 self.write(0x46, &mut [0])?;
@@ -274,8 +279,9 @@ impl Controller for Gpu {
     }
 
     fn frame(&mut self, _zone: &str, color: Rgb) -> Result<(), String> {
+        self.prepare_mode()?;
         self.color(color)?;
-        self.write(MODE_REGISTER, &mut [RGB_MODE])
+        self.write(MODE_REGISTER, &mut [MODE_STATIC])
     }
 }
 
