@@ -54,6 +54,18 @@ pub trait Controller: Send {
     fn begin_animation(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
         self.apply(zone, "solid", color, 100)
     }
+    /// Runs a software effect with the device's own hardware mode when it has a
+    /// close match. `None` means the effect is streamed as frames instead.
+    fn native_effect(
+        &mut self,
+        _zone: &str,
+        _mode: &str,
+        _color: Rgb,
+        _brightness: u8,
+        _speed: u16,
+    ) -> Option<Result<(), String>> {
+        None
+    }
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String>;
     fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
         let mut failures = Vec::new();

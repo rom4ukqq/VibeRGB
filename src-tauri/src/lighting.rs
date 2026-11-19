@@ -518,6 +518,17 @@ impl Worker {
                 return Err("Animation is unavailable on this zone.".into());
             }
             let base = assignment.color;
+            if let Some(result) = controller.native_effect(
+                &target.zone_id,
+                mode,
+                calibration.apply(base),
+                brightness,
+                assignment.speed,
+            ) {
+                result?;
+                self.animations.remove(target);
+                return Ok(());
+            }
             let speed = f64::from(assignment.speed.clamp(25, 250)) / 100.0;
             if !self.animations.contains_key(target) {
                 let initial = dim(

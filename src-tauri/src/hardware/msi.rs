@@ -276,12 +276,8 @@ impl Gpu {
     }
 
     fn write(&self, register: u8, values: &mut [u8]) -> Result<(), String> {
-        self.write_with_delay(register, values, Duration::from_millis(20))
-    }
-
-    fn write_with_delay(&self, register: u8, values: &mut [u8], delay: Duration) -> Result<(), String> {
         self.nvapi.transfer(self.handle, register, values, true)?;
-        thread::sleep(delay);
+        thread::sleep(Duration::from_millis(20));
         Ok(())
     }
 
@@ -297,12 +293,9 @@ impl Gpu {
     }
 }
 
-impl Controller for Gpu {
-    fn device(&self) -> &Device {
-        &self.device
-    }
-
-    fn apply(&mut self, _zone: &str, mode: &str, color: Rgb, brightness: u8) -> Result<(), String> {
+impl Gpu {
+    /// OpenRGB's MSI GPU v2 sequence: idle, colors, brightness, speed, mode.
+    fn program(&self, mode: &str, color: Rgb, brightness: u8, speed: u8) -> Result<(), String> {
         let mode = if brightness == 0 { "off" } else { mode };
         self.prepare_mode()?;
         let value = match mode {
@@ -313,14 +306,12 @@ impl Controller for Gpu {
             }
             "rainbow" => {
                 self.write(0x46, &mut [0])?;
-                self.write(0x38, &mut [2])?;
                 0x08
             }
             "breathing" => {
                 let [red, green, blue] = color;
                 self.write(0x27, &mut [blue, green, red])?;
                 self.write(0x28, &mut [0, 0, 0])?;
-                self.write(0x38, &mut [2])?;
                 0x04
             }
             _ => return Err("Mode unavailable on the MSI GPU.".into()),
@@ -332,30 +323,56 @@ impl Controller for Gpu {
                 brightness.div_ceil(20) * 20
             };
             self.write(0x36, &mut [level])?;
+            if mode != "solid" {
+                self.write(0x38, &mut [speed])?;
+            }
         }
         self.write(MODE_REGISTER, &mut [value])
     }
+}
 
-    fn frame(&mut self, _zone: &str, color: Rgb) -> Result<(), String> {
-        // A new color only latches through the same idle → color → static sequence
-        // as a manual apply, and the LEDs go dark while idle. Keep that sequence but
-        // drop the 20 ms settle time inside it, so the dark window is a few
-        // milliseconds instead of ~100 ms per frame.
-        let [red, green, blue] = color;
-        let short = Duration::from_millis(2);
-        self.write_with_delay(0x2e, &mut [0], short)?;
-        self.write_with_delay(MODE_REGISTER, &mut [MODE_IDLE], short)?;
-        self.write_with_delay(0x30, &mut [red], short)?;
-        self.write_with_delay(0x31, &mut [green], short)?;
-        self.write_with_delay(0x32, &mut [blue], short)?;
-        self.write(MODE_REGISTER, &mut [MODE_STATIC])
+/// OpenRGB's speed register values: slow, normal, fast.
+fn speed_register(speed: u16) -> u8 {
+    match speed {
+        0..=79 => 0x04,
+        80..=149 => 0x02,
+        _ => 0x01,
     }
 }
 
-fn check(status: i32, operation: &str) -> Result<(), String> {
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(format!("NVAPI ({operation}): code {status}."))
+impl Controller for Gpu {
+    fn device(&self) -> &Device {
+        &self.device
+    }
+
+    fn apply(&mut self, _zone: &str, mode: &str, color: Rgb, brightness: u8) -> Result<(), String> {
+        self.program(mode, color, brightness, 0x02)
+    }
+
+    fn native_effect(
+        &mut self,
+        _zone: &str,
+        mode: &str,
+        color: Rgb,
+        brightness: u8,
+        speed: u16,
+    ) -> Option<Result<(), String>> {
+        // Streaming frames over NVAPI I²C is slow and has to pass through the dark
+        // idle mode on every update, so effects the card can run itself use its
+        // own smooth hardware modes.
+        let native = match mode {
+            "pulse" => "breathing",
+            "hue" | "sync-rainbow" => "rainbow",
+            _ => return None,
+        };
+        Some(self.program(native, color, brightness, speed_register(speed)))
+    }
+
+    fn frame(&mut self, _zone: &str, color: Rgb) -> Result<(), String> {
+        // The ITE controller drops writes without OpenRGB's 20 ms settle time, so
+        // keep its full idle → color → static sequence for streamed frames.
+        self.prepare_mode()?;
+        self.color(color)?;
+        self.write(MODE_REGISTER, &mut [MODE_STATIC])
     }
 }
