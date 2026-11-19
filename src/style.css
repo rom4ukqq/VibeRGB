@@ -56,23 +56,32 @@ small { line-height: 1.45; }
   border-radius: 3px;
   background: linear-gradient(90deg, #e5484d 0 33.3%, #46a758 0 66.6%, #3e8ff0 0);
 }
-.navigation, .device-list { display: grid; gap: 2px; }
+.navigation, .device-list { display: grid; gap: 0; }
 .navigation button, .device-row {
+  position: relative;
   color: var(--muted);
   border: 0;
   background: transparent;
-  border-radius: 6px;
+  border-radius: 0;
   text-align: left;
   min-width: 0;
-  padding: 7px 8px;
+  padding: 6px 8px;
 }
-.navigation button { display: flex; align-items: center; gap: 8px; font-weight: 500; }
-.navigation button:hover, .device-row:hover { background: var(--hover); color: var(--ink); }
-.navigation button[aria-current], .device-row[aria-pressed="true"] {
-  color: var(--ink);
-  background: var(--raised);
-  box-shadow: inset 2px 0 var(--ink);
+.navigation button { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.navigation button:hover, .device-row:hover { color: var(--ink); }
+.navigation button[aria-current], .device-row[aria-pressed="true"] { color: var(--ink); }
+.navigation button[aria-current] { font-weight: 600; }
+.navigation button[aria-current]::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  background: var(--ink);
 }
+.device-row[aria-pressed="true"] strong { font-weight: 600; }
+.navigation button:focus-visible, .device-row:focus-visible { outline: 1px solid var(--strong); outline-offset: -1px; }
 .device-heading {
   display: flex;
   justify-content: space-between;
@@ -126,7 +135,8 @@ h1 { font-size: 20px; font-weight: 600; line-height: 1.2; }
   box-shadow: 0 0 14px -2px var(--scene-color);
 }
 .render-off .led { background: #1a1c1f; box-shadow: none; }
-.render-pulse .led, .render-breathing .led { animation: pulse var(--cycle, 4s) ease-in-out infinite; animation-delay: 0s; }
+.render-pulse .led, .render-breathing .led { animation: pulse var(--cycle, 4s) ease-in-out infinite; }
+.render-candle .led { animation: candle var(--cycle, 3s) linear infinite; animation-delay: calc(var(--i) * -0.37s); }
 .render-hue .led { background: #ff2a2a; box-shadow: 0 0 14px -2px #ff2a2a; animation: hue var(--cycle, 6s) linear infinite; animation-delay: 0s; }
 .render-sync-rainbow .led, .render-rainbow .led, .render-spectrum .led {
   background: #ff2a2a;
@@ -141,7 +151,8 @@ h1 { font-size: 20px; font-weight: 600; line-height: 1.2; }
   animation: sunset var(--cycle, 12s) linear infinite;
   animation-delay: calc(var(--i) * var(--cycle, 12s) / -24);
 }
-@keyframes pulse { 0%, 100% { opacity: .15; } 50% { opacity: 1; } }
+@keyframes pulse { 0%, 100% { opacity: .03; } 25%, 75% { opacity: .27; } 50% { opacity: 1; } }
+@keyframes candle { 0%, 100% { opacity: .9; } 13% { opacity: .62; } 27% { opacity: 1; } 41% { opacity: .74; } 55% { opacity: .95; } 68% { opacity: .55; } 84% { opacity: .85; } }
 @keyframes hue { to { filter: hue-rotate(360deg); } }
 @keyframes sunset { from { background-position: 0 0; } to { background-position: 100% 0; } }
 .preview-caption {
@@ -189,15 +200,21 @@ select, input:not([type="color"], [type="range"], [type="checkbox"]) {
 select:hover, input:not([type="color"], [type="range"], [type="checkbox"]):hover { border-color: var(--strong); }
 select option { background: var(--raised); }
 .color-field { padding: 0; margin: 0; border: 0; min-width: 0; }
-.color-field legend { margin-bottom: 6px; padding: 0; font-size: 12.5px; font-weight: 500; }
-.color-row, .swatches { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.color-row { gap: 8px; }
-.picker { cursor: pointer; width: 32px; height: 32px; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--input); }
-.picker::-webkit-color-swatch-wrapper { padding: 0; }
-.picker::-webkit-color-swatch { border: 0; border-radius: 3px; }
-.hex { width: 80px; font: 12px Consolas, monospace; }
-.swatch { border: 0; border-radius: 4px; width: 18px; height: 18px; padding: 0; box-shadow: inset 0 0 0 1px #ffffff1f; }
-.swatch[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
+.color-field { display: grid; gap: 10px; }
+.color-field legend { margin-bottom: 8px; padding: 0; font-size: 12.5px; font-weight: 500; }
+.swatches { display: grid; grid-template-columns: repeat(13, minmax(0, 1fr)); gap: 4px; }
+.swatch { border: 0; border-radius: 3px; aspect-ratio: 1; min-width: 0; padding: 0; box-shadow: inset 0 0 0 1px #ffffff1a; }
+.swatch[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 1px; }
+.slider { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+.slider span { display: flex; justify-content: space-between; }
+.slider output { font: 12px Consolas, monospace; }
+.slider input { appearance: none; width: 100%; height: 10px; margin: 0; border-radius: 3px; cursor: pointer; box-shadow: inset 0 0 0 1px #ffffff14; }
+.hue-track { background: linear-gradient(to right, #f00, #ff0 16.7%, #0f0 33.3%, #0ff 50%, #00f 66.7%, #f0f 83.3%, #f00); }
+.saturation-track { background: linear-gradient(to right, #fff, var(--hue-color)); }
+.slider input::-webkit-slider-thumb { appearance: none; width: 6px; height: 16px; border-radius: 2px; background: var(--ink); box-shadow: 0 0 0 1px #0e0f11, 0 1px 3px #000a; }
+.hex-row { display: flex; align-items: center; gap: 8px; }
+.color-chip { width: 32px; height: 32px; border-radius: 6px; box-shadow: inset 0 0 0 1px #ffffff1f; }
+.hex { width: 92px; font: 12px Consolas, monospace; }
 .validation { display: block; margin-top: 5px; color: #f2777a; }
 .brightness { display: grid; gap: 6px; }
 .brightness label { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; font-weight: 500; }
@@ -270,6 +287,6 @@ select option { background: var(--raised); }
 }
 @media (forced-colors: active) {
   .setting-row input[role="switch"] { appearance: auto; }
-  .swatch, .led { forced-color-adjust: none; }
+  .swatch, .led, .slider input, .color-chip { forced-color-adjust: none; }
   .choice[aria-pressed="true"], .segment button[aria-pressed="true"] { outline: 2px solid Highlight; }
 }

@@ -9,15 +9,17 @@ import { api, type ApplyResult, type Assignment, type Device, type Effect, type 
 import { localizeDiagnostic, messages, sceneName, type Language, type Messages } from './i18n';
 import { MatrixBackdrop } from './CanvasMatrix';
 import { Profiles } from './profiles';
+import { ColorPicker } from './ColorPicker';
 import './style.css';
 
-const PALETTE = ['#A891FF', '#78D7FF', '#70E5C1', '#FFCB87', '#FA849D', '#F4F0FF'];
+const DEFAULT_COLOR = '#00AAFF';
 const STATIC: Effect[] = [
   { id: 'solid', name: 'Color', color: true, brightness: true },
   { id: 'off', name: 'Off', color: false, brightness: false },
 ];
 const SYNC: Effect[] = [
   { id: 'pulse', name: 'Pulse', color: true, brightness: true },
+  { id: 'candle', name: 'Candle', color: true, brightness: true },
   { id: 'hue', name: 'Spectrum', color: false, brightness: true },
   { id: 'sync-rainbow', name: 'Rainbow', color: false, brightness: true },
   { id: 'gta-vi', name: 'GTA VI', color: false, brightness: true },
@@ -47,7 +49,7 @@ function App() {
   const [zoneId, setZoneId] = useState('');
   const [scene, setScene] = useState('solid');
   const [hardwareEffect, setHardwareEffect] = useState('');
-  const [color, setColor] = useState(PALETTE[0]);
+  const [color, setColor] = useState(DEFAULT_COLOR);
   const [brightness, setBrightness] = useState(100);
   const [speed, setSpeed] = useState(100);
   const [pending, setPending] = useState(true);
@@ -179,8 +181,8 @@ function App() {
     });
   }
 
-  const previewColor = mode?.id === 'gta-vi' ? '#c219c1' : mode?.color && validColor ? color : PALETTE[0];
-  const cycleSeconds = mode?.id === 'pulse' ? 4 : mode?.id === 'gta-vi' ? 12 : 6;
+  const previewColor = mode?.id === 'gta-vi' ? '#c219c1' : mode?.color && validColor ? color : DEFAULT_COLOR;
+  const cycleSeconds = mode?.id === 'pulse' ? 4 : mode?.id === 'candle' ? 3 : mode?.id === 'gta-vi' ? 12 : 6;
   const previewStyle = {
     '--scene-color': previewColor,
     '--level': mode?.id === 'off' ? 0 : dimmable ? brightness / 100 : 1,
@@ -328,18 +330,7 @@ function App() {
                   {modes.map(item => <button key={item.id} className="choice" aria-pressed={mode?.id === item.id}
                     onClick={() => (group === 'sync' ? setScene : setHardwareEffect)(item.id)}>{sceneName(item.id, item.name, t)}</button>)}
                 </div>
-                {mode?.color && <fieldset className="color-field">
-                  <legend>{t.color}</legend>
-                  <div className="color-row">
-                    <input className="picker" type="color" aria-label={t.picker} value={validColor ? color : PALETTE[0]}
-                      onChange={event => setColor(event.target.value.toUpperCase())} />
-                    <input className="hex" aria-label="HEX" value={color} maxLength={7} aria-invalid={!validColor}
-                      onChange={event => setColor(event.target.value.toUpperCase())} spellCheck={false} />
-                    <div className="swatches">{PALETTE.map(preset => <button key={preset} className="swatch"
-                      style={{ background: preset }} aria-label={preset} aria-pressed={color === preset} onClick={() => setColor(preset)} />)}</div>
-                  </div>
-                  {!validColor && <small className="validation">{t.colorFormat}</small>}
-                </fieldset>}
+                {mode?.color && <ColorPicker value={color} onChange={setColor} t={t} />}
                 {dimmable && <div className="brightness">
                   <label htmlFor="brightness">{t.brightness} <output htmlFor="brightness">{brightness}%</output></label>
                   <input id="brightness" type="range" min="0" max="100" value={brightness}

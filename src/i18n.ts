@@ -20,6 +20,7 @@ const en = {
   zone: 'Zone', allZones: 'All zones', effect: 'Effect', color: 'Color',
   off: 'Off', pulse: 'Pulse', hue: 'Spectrum', breathing: 'Breathing', spectrum: 'Color cycle',
   rainbow: 'Rainbow', picker: 'Color picker', colorFormat: 'Use #RRGGBB.',
+  candle: 'Candle', tone: 'Hue', saturation: 'Saturation',
   brightness: 'Brightness', speed: 'Speed', partialBrightness: 'Brightness only changes on supported zones.',
   scanning: 'Looking for controllers…', noZones: 'No available zones.', unsupported: 'This effect is unavailable on the selected zones.',
   apply: 'Apply', updated: 'Zones updated', noUpdates: 'No zones updated.',
@@ -51,6 +52,7 @@ const ru: { [K in keyof typeof en]: string } = {
   zone: 'Зона', allZones: 'Все зоны', effect: 'Эффект', color: 'Цвет',
   off: 'Выкл.', pulse: 'Пульс', hue: 'Спектр', breathing: 'Дыхание', spectrum: 'Смена цветов',
   rainbow: 'Радуга', picker: 'Палитра', colorFormat: 'Формат — #RRGGBB.',
+  candle: 'Свеча', tone: 'Оттенок', saturation: 'Насыщенность',
   brightness: 'Яркость', speed: 'Скорость', partialBrightness: 'Яркость изменится только в поддерживаемых зонах.',
   scanning: 'Поиск контроллеров…', noZones: 'Нет доступных зон.', unsupported: 'Эффект недоступен в выбранных зонах.',
   apply: 'Применить', updated: 'Зон обновлено', noUpdates: 'Зоны не обновлены.',
@@ -69,7 +71,7 @@ export function sceneName(id: string, fallback: string, labels: Messages) {
   switch (id) {
     case 'solid': return labels.color;
     case 'sync-rainbow': return labels.rainbow;
-    case 'off': case 'pulse': case 'hue': case 'breathing': case 'spectrum': case 'rainbow':
+    case 'off': case 'pulse': case 'candle': case 'hue': case 'breathing': case 'spectrum': case 'rainbow':
       return labels[id];
     default: return fallback;
   }

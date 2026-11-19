@@ -133,6 +133,7 @@ impl Animation {
 #[derive(Clone, Copy)]
 enum AnimationKind {
     Pulse,
+    Candle(f64),
     Hue,
     Rainbow(f64),
     GtaVi(f64),
@@ -142,6 +143,7 @@ impl AnimationKind {
     fn from_mode(mode: &str) -> Option<Self> {
         match mode {
             "pulse" => Some(Self::Pulse),
+            "candle" => Some(Self::Candle(0.0)),
             "hue" => Some(Self::Hue),
             "sync-rainbow" => Some(Self::Rainbow(0.0)),
             "gta-vi" => Some(Self::GtaVi(0.0)),
@@ -152,8 +154,16 @@ impl AnimationKind {
     fn color(self, base: Rgb, seconds: f64) -> Rgb {
         match self {
             Self::Pulse => {
-                let level = 0.15 + 0.85 * (0.5 - 0.5 * (seconds * TAU / 4.0).cos());
-                base.map(|channel| (f64::from(channel) * level).round() as u8)
+                // Square the wave so the fade looks even to the eye instead of
+                // lingering near full brightness and dropping off at the end.
+                let wave = 0.5 - 0.5 * (seconds * TAU / 4.0).cos();
+                scale(base, 0.03 + 0.97 * wave * wave)
+            }
+            Self::Candle(offset) => {
+                let t = seconds + offset * 7.0;
+                let flicker = 0.5 * (t * 1.7).sin() + 0.3 * (t * 3.9 + 1.0).sin()
+                    + 0.2 * (t * 7.3 + 2.0).sin();
+                scale(base, 0.72 + 0.28 * flicker)
             }
             Self::Hue | Self::Rainbow(_) => {
                 const COLORS: [Rgb; 6] = [
@@ -186,6 +196,11 @@ impl AnimationKind {
             }
         }
     }
+}
+
+fn scale(color: Rgb, level: f64) -> Rgb {
+    let level = level.clamp(0.0, 1.0);
+    color.map(|channel| (f64::from(channel) * level).round() as u8)
 }
 
 fn cycle_color(colors: &[Rgb], position: f64) -> Rgb {
@@ -355,6 +370,9 @@ impl Worker {
             }
             Some(AnimationKind::GtaVi(_)) => {
                 Some(AnimationKind::GtaVi(self.zone_phase_offset(target)))
+            }
+            Some(AnimationKind::Candle(_)) => {
+                Some(AnimationKind::Candle(self.zone_phase_offset(target)))
             }
             other => other,
         };
