@@ -376,3 +376,11 @@ impl Controller for Gpu {
         self.write(MODE_REGISTER, &mut [MODE_STATIC])
     }
 }
+
+fn check(status: i32, operation: &str) -> Result<(), String> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!("NVAPI ({operation}): code {status}."))
+    }
+}
