@@ -331,17 +331,17 @@ impl Dimm {
     }
 
     fn pixels(&mut self, color: Rgb) -> Result<(), String> {
+        if self.shown == Some(color) {
+            return Ok(());
+        }
+        self.shown = None;
         let [red, green, blue] = color;
-        let previous = self.shown.take();
-        // Every LED shows the same color, so a channel that didn't change can be
-        // skipped on all of them. Each register write costs two SMBus transactions.
-        let changed = |index: usize| previous.map_or(true, |old| old[index] != color[index]);
-        for led in 0..u16::from(self.leds) {
-            let register = self.direct_register + led * 3;
-            for (offset, value, index) in [(0, red, 0), (1, blue, 2), (2, green, 1)] {
-                if changed(index) {
-                    self.bus.write_register(self.address, register + offset, value)?;
-                }
+        // The ENE register pointer auto-increments, so set it once and stream the
+        // R, B, G bytes of every LED (OpenRGB's byte-write path does the same).
+        self.bus.write(self.address, 0, WORD_DATA, self.direct_register.swap_bytes())?;
+        for _ in 0..self.leds {
+            for value in [red, blue, green] {
+                self.bus.write(self.address, 0x01, BYTE_DATA, value.into())?;
             }
         }
         self.shown = Some(color);

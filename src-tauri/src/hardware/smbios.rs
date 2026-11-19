@@ -20,6 +20,13 @@ impl Firmware {
         firmware
     }
 
+    pub fn board_name(&self) -> Option<String> {
+        self.structures()
+            .find(|(fields, _)| fields[0] == 2)
+            .map(|(fields, strings)| field(fields, strings, 5).trim().to_owned())
+            .filter(|name| !name.is_empty())
+    }
+
     pub fn board_matches(&self, model: &str) -> bool {
         self.structures().any(|(fields, strings)| {
             fields[0] == 2 && field(fields, strings, 5).eq_ignore_ascii_case(model)

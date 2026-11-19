@@ -35,10 +35,29 @@ const BOARDS: &[(&str, &str)] = &[
     ("B550 Phantom Gaming-ITX/ax", "asrock-b550-phantom-gaming-itx-ax"),
 ];
 
-pub fn identify(firmware: &Firmware) -> Option<(&'static str, &'static str)> {
-    BOARDS.iter().copied().find(|(model, _)| firmware.board_matches(model))
+/// Returns the board model, a stable device ID and whether the board is one of
+/// the tested models. Polychrome USB itself is detected by its HID ID on any board.
+pub fn identify(firmware: &Firmware) -> (String, String, bool) {
+    if let Some((model, id)) = BOARDS.iter().copied().find(|(model, _)| firmware.board_matches(model)) {
+        return (model.into(), id.into(), true);
+    }
+    let model = firmware.board_name().unwrap_or_else(|| "Polychrome".into());
+    let slug: String = model
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() { character } else { '-' })
+        .collect();
+    let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    (model, format!("asrock-{slug}"), false)
 }
+
 const MODE_STATIC: u8 = 0x01;
+const MODE_DIRECT: u8 = 0x0f;
+const SET_ZONE: u8 = 0x10;
+const WRITE_HEADER: u8 = 0x15;
+const RGSWAP_CONFIG: u8 = 0x03;
+const DEFAULT_SPEED: u8 = 0xe0;
+const ADDRESSABLE_MAX_LEDS: usize = 100;
 const ZONES: [&str; 8] = [
     "RGB LED 1",
     "RGB LED 2",
@@ -74,6 +93,11 @@ pub struct Board {
     hid: File,
     device: Device,
     red_green_order: u8,
+    channels: Vec<usize>,
+    counts: [u8; 8],
+    colors: [Rgb; 8],
+    /// Channels currently in Direct mode, one bit per channel.
+    direct: u8,
 }
 
 impl Board {
@@ -82,17 +106,19 @@ impl Board {
         let availability = read_configuration(&hid, 1)?[0];
         let counts = read_configuration(&hid, 2)?;
         let red_green_order = read_configuration(&hid, 3)?[0];
+        let channels: Vec<usize> = (0..ZONES.len())
+            .filter(|&channel| availability & (1 << channel) != 0 && counts[channel] != 0x1e)
+            .collect();
         let zones = ZONES
             .iter()
             .enumerate()
-            .filter(|(channel, _)| availability & (1 << channel) != 0 && counts[*channel] != 0x1e)
+            .filter(|(channel, _)| channels.contains(channel))
             .map(|(channel, name)| {
                 Zone {
                     id: channel.to_string(),
                     name: (*name).into(),
                     effects: EFFECTS.to_vec(),
-                    // Frames use the per-zone static command, which every zone accepts,
-                    // so software effects don't depend on the reported LED count.
+                    // Every Polychrome channel accepts Direct mode (OpenRGB exposes it on all).
                     direct: true,
                 }
             })
@@ -112,6 +138,10 @@ impl Board {
             hid,
             device,
             red_green_order,
+            channels,
+            counts,
+            colors: [[0; 3]; 8],
+            direct: 0,
         })
     }
 
@@ -126,9 +156,65 @@ impl Board {
     fn write_mode(&self, channel: usize, mode: u8, color: Rgb) -> Result<(), String> {
         let [first, second, blue] = self.channel_color(channel, color);
         let mut report = [0; 65];
-        report[1] = 0x10;
-        report[3..10].copy_from_slice(&[channel as u8, mode, first, second, blue, 0xe0, 0xff]);
+        report[1] = SET_ZONE;
+        report[3..10].copy_from_slice(&[channel as u8, mode, first, second, blue, DEFAULT_SPEED, 0xff]);
         exchange(&self.hid, &report).map(|_| ())
+    }
+
+    /// The controller's own R/G swap makes Direct mode flash on every update
+    /// (as noted in OpenRGB), so it is off while any channel is in Direct mode
+    /// and the swap is done here instead. The original setting is restored after.
+    fn hardware_swap(&self, enabled: bool) -> Result<(), String> {
+        let mut report = [0; 65];
+        report[1] = WRITE_HEADER;
+        report[3] = RGSWAP_CONFIG;
+        report[4] = if enabled { self.red_green_order } else { 0 };
+        exchange(&self.hid, &report).map(|_| ())
+    }
+
+    /// Streams every LED of every channel, matching OpenRGB's Direct update.
+    /// Channels that are not in Direct mode ignore their part of the stream.
+    fn write_direct(&self) -> Result<(), String> {
+        let mut bytes = Vec::new();
+        let mut capacity = 0;
+        for &channel in &self.channels {
+            let count = usize::from(self.counts[channel]);
+            let color = self.channel_color(channel, self.colors[channel]);
+            for _ in 0..count {
+                bytes.extend_from_slice(&color);
+            }
+            capacity += if matches!(channel, 2 | 3 | 7) { ADDRESSABLE_MAX_LEDS } else { count };
+        }
+        bytes.resize((capacity + 8) * 3, 0);
+        let mut report = [0; 65];
+        report[1] = SET_ZONE;
+        report[3] = 0xff;
+        report[4] = 0xe3;
+        report[7] = 0xff;
+        report[0x40] = 0x65;
+        let (mut offset, mut chunk) = (9, 54);
+        let mut sent = 0;
+        while sent < bytes.len() {
+            let length = chunk.min(bytes.len() - sent);
+            report[offset..offset + length].copy_from_slice(&bytes[sent..sent + length]);
+            sent += length;
+            exchange(&self.hid, &report)?;
+            report = [0; 65];
+            report[1] = SET_ZONE;
+            report[3] = 0xff;
+            report[4] = 0xe4;
+            report[0x40] = 0x65;
+            (offset, chunk) = (5, 57);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Board {
+    fn drop(&mut self) {
+        if self.direct != 0 {
+            let _ = self.hardware_swap(true);
+        }
     }
 }
 
@@ -154,13 +240,39 @@ impl Controller for Board {
             ("rainbow", _) => 0x0e,
             _ => return Err("Mode unavailable on Polychrome.".into()),
         };
-        self.write_mode(channel, mode, dim(color, brightness))
+        let color = dim(color, brightness);
+        let remaining = self.direct & !(1 << channel);
+        if self.direct != 0 && remaining == 0 {
+            self.hardware_swap(true)?;
+        }
+        self.direct = remaining;
+        self.colors[channel] = color;
+        self.write_mode(channel, mode, color)
+    }
+
+    fn begin_animation(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
+        let channel = channel(zone)?;
+        if self.direct == 0 {
+            self.hardware_swap(false)?;
+        }
+        self.direct |= 1 << channel;
+        self.colors[channel] = color;
+        self.write_mode(channel, MODE_DIRECT, color)?;
+        self.write_direct()
     }
 
     fn frame(&mut self, zone: &str, color: Rgb) -> Result<(), String> {
-        // B550M Pro4 can flash in per-LED Direct mode. Stream the same
-        // per-zone static-color command that the Color preset uses.
-        self.write_mode(channel(zone)?, MODE_STATIC, color)
+        self.colors[channel(zone)?] = color;
+        self.write_direct()
+    }
+
+    fn frames(&mut self, updates: &[(&str, Rgb)]) -> Result<Vec<(String, String)>, String> {
+        // One Direct stream carries every channel, so send it once per batch.
+        for &(zone, color) in updates {
+            self.colors[channel(zone)?] = color;
+        }
+        self.write_direct()?;
+        Ok(Vec::new())
     }
 }
 

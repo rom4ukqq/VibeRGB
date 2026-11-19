@@ -99,13 +99,20 @@ impl Hardware {
                 unavailable: firmware.memory(),
                 ..Self::default()
             };
-            if let Some((model, id)) = asrock::identify(&firmware) {
-                let name = format!("ASRock {model}");
-                hardware.add(id, &name, asrock::Board::open(id, &name));
+            let (model, id, known_board) = asrock::identify(&firmware);
+            let name = format!("ASRock {model}");
+            let board = asrock::Board::open(&id, &name);
+            let polychrome = board.is_ok();
+            if known_board {
+                hardware.add(&id, &name, board);
+            } else if let Ok(board) = board {
+                // Polychrome USB was found on a board that isn't in the tested list.
+                hardware.controllers.push(Output::new(Box::new(board)));
             }
             hardware.add("msi-mystic-light", "MSI Mystic Light GPU", msi::Gpu::open());
-            // Every supported board is an AMD B550 board with the same PIIX4 SMBus.
-            if asrock::identify(&firmware).is_some()
+            // ENE memory sits on the AMD PIIX4 SMBus, which every Polychrome USB
+            // board in use here (AMD B550 and newer AMD chipsets) provides.
+            if (known_board || polychrome || amd_board(&firmware))
                 && hardware.unavailable.iter().any(is_adata_memory)
             {
                 let count = hardware
@@ -183,6 +190,15 @@ impl Hardware {
     pub fn output(&self, id: &str) -> Option<&Output> {
         self.controllers.iter().find(|output| output.device.id == id)
     }
+}
+
+#[cfg(windows)]
+fn amd_board(firmware: &smbios::Firmware) -> bool {
+    const AMD_CHIPSETS: [&str; 10] = ["A520", "B450", "B550", "X470", "X570", "A620", "B650", "X670", "B850", "X870"];
+    firmware.board_name().is_some_and(|name| {
+        let name = name.to_ascii_uppercase();
+        AMD_CHIPSETS.iter().any(|chipset| name.contains(chipset))
+    })
 }
 
 #[cfg(windows)]

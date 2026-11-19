@@ -12,10 +12,57 @@ use windows_sys::Win32::{
 
 use super::{dim, Controller, Device, Effect, Rgb, Zone};
 
-const NVIDIA_DEVICE: u32 = 0x2783_10de;
-const GPU_MODELS: &[(u32, &str, &str)] = &[
-    (0xe134_1462, "msi-4070-super-mlg", "MSI RTX 4070 SUPER Gaming X Slim MLG"),
-    (0xe131_1462, "msi-4070-super-white", "MSI RTX 4070 SUPER Gaming X Slim White"),
+const NVIDIA_VENDOR: u32 = 0x10de;
+const MSI_VENDOR: u32 = 0x1462;
+// Device ID, subsystem ID, VibeRGB ID, name. From OpenRGB's MSI GPU v2 (ITE9) list;
+// all use the same I²C protocol at 0x68.
+const GPU_MODELS: &[(u16, u16, &str, &str)] = &[
+    (0x2882, 0x5160, "msi-4060-gaming-x-5160", "MSI GeForce RTX 4060 Gaming X"),
+    (0x2882, 0x5164, "msi-4060-gaming-x-nv-edition-5164", "MSI GeForce RTX 4060 Gaming X NV Edition"),
+    (0x2803, 0x5152, "msi-4060-ti-gaming-x-5152", "MSI GeForce RTX 4060 Ti Gaming X"),
+    (0x2805, 0x5172, "msi-4060-ti-16gb-gaming-x-5172", "MSI GeForce RTX 4060 Ti 16GB Gaming X"),
+    (0x2805, 0x5171, "msi-4060-ti-16gb-gaming-x-slim-white-5171", "MSI GeForce RTX 4060 Ti 16GB Gaming X Slim White"),
+    (0x2786, 0x5136, "msi-4070-gaming-x-trio-5136", "MSI GeForce RTX 4070 Gaming X Trio"),
+    (0x2786, 0x513f, "msi-4070-gaming-x-slim-513f", "MSI GeForce RTX 4070 Gaming X Slim"),
+    (0x2786, 0xe131, "msi-4070-gaming-x-slim-white-e131", "MSI GeForce RTX 4070 Gaming X Slim White"),
+    (0x2783, 0x513f, "msi-4070-super-gaming-x-slim-513f", "MSI GeForce RTX 4070 SUPER Gaming X Slim"),
+    (0x2783, 0xe131, "msi-4070-super-white", "MSI RTX 4070 SUPER Gaming X Slim White"),
+    (0x2783, 0xe134, "msi-4070-super-mlg", "MSI RTX 4070 SUPER Gaming X Slim MLG"),
+    (0x2782, 0x5132, "msi-4070-ti-gaming-x-trio-5132", "MSI GeForce RTX 4070 Ti Gaming X Trio"),
+    (0x2782, 0x5139, "msi-4070-ti-gaming-x-trio-white-5139", "MSI GeForce RTX 4070 Ti Gaming X Trio White"),
+    (0x2782, 0xe132, "msi-4070-ti-gaming-x-slim-white-e132", "MSI GeForce RTX 4070 Ti Gaming X Slim White"),
+    (0x2782, 0x5133, "msi-4070-ti-suprim-x-trio-5133", "MSI GeForce RTX 4070 Ti Suprim X Trio"),
+    (0x2705, 0x5139, "msi-4070-ti-super-gaming-x-trio-white-5139", "MSI GeForce RTX 4070 Ti SUPER Gaming X Trio White"),
+    (0x2705, 0xe130, "msi-4070-ti-super-gaming-slim-e130", "MSI GeForce RTX 4070 Ti SUPER Gaming Slim"),
+    (0x2705, 0xe13d, "msi-4070-ti-super-gaming-x-slim-e13d", "MSI GeForce RTX 4070 Ti SUPER Gaming X Slim"),
+    (0x2705, 0xe13e, "msi-4070-ti-super-gaming-x-slim-white-e13e", "MSI GeForce RTX 4070 Ti SUPER Gaming X Slim White"),
+    (0x2705, 0xe132, "msi-4070-ti-super-gaming-x-slim-white-rev-2-e132", "MSI GeForce RTX 4070 Ti SUPER Gaming X Slim White (rev. 2)"),
+    (0x2704, 0x511a, "msi-4080-gaming-x-slim-white-511a", "MSI GeForce RTX 4080 Gaming X Slim White"),
+    (0x2704, 0x5111, "msi-4080-gaming-x-trio-5111", "MSI GeForce RTX 4080 Gaming X Trio"),
+    (0x2704, 0x5115, "msi-4080-gaming-x-trio-white-5115", "MSI GeForce RTX 4080 Gaming X Trio White"),
+    (0x2704, 0x5110, "msi-4080-suprim-x-5110", "MSI GeForce RTX 4080 Suprim X"),
+    (0x2702, 0x5117, "msi-4080-super-gaming-x-slim-5117", "MSI GeForce RTX 4080 SUPER Gaming X Slim"),
+    (0x2702, 0x511a, "msi-4080-super-gaming-x-slim-white-511a", "MSI GeForce RTX 4080 SUPER Gaming X Slim White"),
+    (0x2702, 0x5110, "msi-4080-super-suprim-x-5110", "MSI GeForce RTX 4080 SUPER Suprim X"),
+    (0x2702, 0x5111, "msi-4080-super-gaming-x-trio-5111", "MSI GeForce RTX 4080 SUPER Gaming X Trio"),
+    (0x2684, 0x5103, "msi-4090-gaming-x-trio-5103", "MSI GeForce RTX 4090 Gaming X Trio"),
+    (0x2684, 0x510b, "msi-4090-gaming-x-slim-510b", "MSI GeForce RTX 4090 Gaming X Slim"),
+    (0x2684, 0x5104, "msi-4090-suprim-liquid-x-5104", "MSI GeForce RTX 4090 Suprim Liquid X"),
+    (0x2684, 0x5102, "msi-4090-suprim-x-5102", "MSI GeForce RTX 4090 Suprim X"),
+    (0x2684, 0x5105, "msi-4090-suprim-x-classic-5105", "MSI GeForce RTX 4090 Suprim X Classic"),
+    (0x2d04, 0x5354, "msi-5060-ti-gaming-oc-5354", "MSI GeForce RTX 5060 Ti Gaming OC"),
+    (0x2d05, 0x5372, "msi-5060-gaming-trio-oc-5372", "MSI GeForce RTX 5060 Gaming Trio OC"),
+    (0x2d04, 0x5353, "msi-5060-ti-16g-gaming-trio-oc-5353", "MSI GeForce RTX 5060 Ti 16G Gaming Trio OC"),
+    (0x2f04, 0x5322, "msi-5070-gaming-trio-5322", "MSI GeForce RTX 5070 Gaming Trio"),
+    (0x2c05, 0x5315, "msi-5070-ti-gaming-trio-oc-plus-5315", "MSI GeForce RTX 5070 Ti Gaming Trio OC Plus"),
+    (0x2c02, 0x5315, "msi-5080-gaming-trio-oc-5315", "MSI GeForce RTX 5080 Gaming Trio OC"),
+    (0x2c02, 0x5314, "msi-5080-vanguard-oc-soc-5314", "MSI GeForce RTX 5080 Vanguard OC SOC"),
+    (0x2c02, 0x5313, "msi-5080-suprim-soc-5313", "MSI GeForce RTX 5080 Suprim SOC"),
+    (0x2c02, 0x5312, "msi-5080-suprim-liquid-soc-5312", "MSI GeForce RTX 5080 Suprim Liquid SOC"),
+    (0x2b85, 0x5303, "msi-5090-gaming-trio-oc-5303", "MSI GeForce RTX 5090 Gaming Trio OC"),
+    (0x2b85, 0x5302, "msi-5090-vanguard-soc-5302", "MSI GeForce RTX 5090 Vanguard SOC"),
+    (0x2b85, 0x5301, "msi-5090-suprim-soc-5301", "MSI GeForce RTX 5090 Suprim SOC"),
+    (0x2b85, 0x5300, "msi-5090-suprim-liquid-soc-5300", "MSI GeForce RTX 5090 Suprim Liquid SOC"),
 ];
 const MODE_REGISTER: u8 = 0x22;
 const MODE_IDLE: u8 = 0x1c;
@@ -141,11 +188,13 @@ impl Nvapi {
                     &mut extended,
                 )
             };
-            if result != 0 || device != NVIDIA_DEVICE {
+            // NVAPI packs the vendor in the low word and the device in the high word.
+            if result != 0 || device & 0xffff != NVIDIA_VENDOR || subsystem & 0xffff != MSI_VENDOR {
                 return None;
             }
-            GPU_MODELS.iter().find(|model| model.0 == subsystem)
-                .map(|&(_, id, name)| (handle, id, name))
+            let (device, subsystem) = ((device >> 16) as u16, (subsystem >> 16) as u16);
+            GPU_MODELS.iter().find(|model| model.0 == device && model.1 == subsystem)
+                .map(|&(_, _, id, name)| (handle, id, name))
         });
         let handle = matches
             .next()
