@@ -196,18 +196,18 @@ function App() {
       <aside className="rail">
         <div className="brand"><span className="brand-mark" aria-hidden="true" />VibeRGB</div>
         <nav className="navigation" aria-label={t.sections}>
-          {([['studio', '◉'], ['profiles', '◇'], ['settings', '⚙']] as const).map(([page, icon]) =>
+          {(['studio', 'profiles', 'settings'] as const).map(page =>
             <button key={page} aria-current={tab === page ? 'page' : undefined} onClick={() => setTab(page)}>
-              <span className="nav-symbol" aria-hidden="true">{icon}</span>{t[page]}{page === 'settings' && updates.version && <span className="update-dot" aria-label={t.available} />}
+              {t[page]}{page === 'settings' && updates.version && <span className="update-dot" aria-label={t.available} />}
             </button>)}
         </nav>
         <div className="device-heading"><h2>{t.devices}</h2><Button size="small" appearance="subtle" disabled={pending} aria-label={t.refresh} title={t.refresh} onClick={() => void run(refreshDevices)}>↻</Button></div>
         <div className="device-list">
           <button className="device-row" aria-pressed={tab === 'studio' && deviceId === ''} onClick={() => selectDevice('')}>
-            <span className="device-icon" aria-hidden="true">◈</span><span><strong>{t.all}</strong><small>{t.active}: {connected.length}</small></span>
+            <span className="device-icon available" aria-hidden="true" /><span><strong>{t.all}</strong><small>{t.active}: {connected.length}</small></span>
           </button>
           {devices.map(item => <button key={item.id} className="device-row" aria-pressed={tab === 'studio' && deviceId === item.id} onClick={() => selectDevice(item.id)}>
-            <span className={item.zones.length ? 'device-icon available' : 'device-icon inactive'} aria-hidden="true">{item.id.startsWith('dimm') ? '▤' : '▣'}</span>
+            <span className={item.zones.length ? 'device-icon available' : 'device-icon inactive'} aria-hidden="true" />
             <span><strong>{localize(item.name)}</strong><small>{item.zones.length ? `${t.zones}: ${item.zones.length}` : t.unavailable}</small></span>
           </button>)}
         </div>
@@ -222,7 +222,7 @@ function App() {
               {t.stop}
             </Button>}
           </header>
-          {notice && <div className="notice glass" role="status">
+          {notice && <div className="notice" role="status">
             <div><strong>{notice.label ? t[notice.label] : localize(notice.message ?? '')}{notice.count ? `: ${notice.count}` : ''}</strong>{notice.issues.length > 0 && <ul>{notice.issues.map(issue => <li key={issue}>{localize(issue)}</li>)}</ul>}</div>
             <Button appearance="subtle" size="small" aria-label={t.dismiss} onClick={() => setNotice(undefined)}>×</Button>
           </div>}
@@ -291,9 +291,10 @@ function App() {
             onApply={id => run(async () => showResult(await api.applyProfile(id)))} /> :
           <div className="studio">
             <section className="preview glass" style={previewStyle} aria-label={t.preview}>
-              <div className="preview-heading"><span className="live-dot" />{t.preview}</div>
+              <div className="preview-heading">{t.preview}</div>
               <div className={`render render-${mode?.id ?? 'off'}`} aria-hidden="true">
-                <div className="orbit orbit-outer" /><div className="orbit orbit-inner" /><div className="orb" />
+                <div className="strip">{Array.from({ length: 24 }, (_, index) =>
+                  <span key={index} className="led" style={{ '--i': index } as CSSProperties} />)}</div>
               </div>
               <div className="preview-caption">
                 <div><strong>{mode ? sceneName(mode.id, mode.name, t) : t.noEffect}</strong><small>{device ? localize(device.name) : t.all}</small></div>
