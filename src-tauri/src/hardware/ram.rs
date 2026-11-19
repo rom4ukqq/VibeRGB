@@ -213,6 +213,8 @@ pub struct Dimm {
     address: u8,
     direct_register: u16,
     leds: u8,
+    /// Last color written in direct mode, used to skip unchanged channels.
+    shown: Option<Rgb>,
 }
 
 impl Dimm {
@@ -324,17 +326,25 @@ impl Dimm {
             address,
             direct_register,
             leds,
+            shown: None,
         }))
     }
 
-    fn pixels(&self, [red, green, blue]: Rgb) -> Result<(), String> {
+    fn pixels(&mut self, color: Rgb) -> Result<(), String> {
+        let [red, green, blue] = color;
+        let previous = self.shown.take();
+        // Every LED shows the same color, so a channel that didn't change can be
+        // skipped on all of them. Each register write costs two SMBus transactions.
+        let changed = |index: usize| previous.map_or(true, |old| old[index] != color[index]);
         for led in 0..u16::from(self.leds) {
             let register = self.direct_register + led * 3;
-            for (offset, value) in [(0, red), (1, blue), (2, green)] {
-                self.bus
-                    .write_register(self.address, register + offset, value)?;
+            for (offset, value, index) in [(0, red, 0), (1, blue, 2), (2, green, 1)] {
+                if changed(index) {
+                    self.bus.write_register(self.address, register + offset, value)?;
+                }
             }
         }
+        self.shown = Some(color);
         Ok(())
     }
 }
@@ -350,14 +360,17 @@ impl Controller for Dimm {
             "solid" => dim(color, brightness),
             _ => return Err("Mode unavailable on this memory module.".into()),
         };
-        let _guard = self.bus.lock()?;
-        self.bus.write_register(self.address, 0x8020, 1)?;
-        self.bus.write_register(self.address, APPLY, 1)?;
+        let bus = Arc::clone(&self.bus);
+        let _guard = bus.lock()?;
+        bus.write_register(self.address, 0x8020, 1)?;
+        bus.write_register(self.address, APPLY, 1)?;
+        self.shown = None;
         self.pixels(color)
     }
 
     fn frame(&mut self, _zone: &str, color: Rgb) -> Result<(), String> {
-        let _guard = self.bus.lock()?;
+        let bus = Arc::clone(&self.bus);
+        let _guard = bus.lock()?;
         self.pixels(color)
     }
 }

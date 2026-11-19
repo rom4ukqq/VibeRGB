@@ -91,7 +91,9 @@ impl Board {
                     id: channel.to_string(),
                     name: (*name).into(),
                     effects: EFFECTS.to_vec(),
-                    direct: matches!(counts[channel], 1..=100),
+                    // Frames use the per-zone static command, which every zone accepts,
+                    // so software effects don't depend on the reported LED count.
+                    direct: true,
                 }
             })
             .collect::<Vec<_>>();

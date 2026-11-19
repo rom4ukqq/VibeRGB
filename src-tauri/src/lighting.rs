@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     f64::consts::TAU,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc, Condvar, Mutex, MutexGuard,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -9,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::hardware::{dim, Device, Hardware, Rgb};
+use crate::hardware::{dim, Device, Hardware, Rgb, SharedController};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const COLOR_CYCLE_SECONDS: f64 = 6.0;
@@ -214,8 +217,92 @@ fn cycle_color(colors: &[Rgb], position: f64) -> Rgb {
     })
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Default)]
+struct PumpState {
+    /// Latest frame per zone. Older frames are replaced, never queued.
+    pending: BTreeMap<String, Rgb>,
+    failures: Vec<(String, String)>,
+    fatal: Option<String>,
+    stop: bool,
+}
+
+/// Writes animation frames to one device on its own thread, so a slow
+/// transport only lowers its own frame rate instead of stalling every device.
+struct Pump {
+    state: Arc<(Mutex<PumpState>, Condvar)>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Pump {
+    fn start(controller: SharedController) -> Self {
+        let state = Arc::new((Mutex::new(PumpState::default()), Condvar::new()));
+        let shared = Arc::clone(&state);
+        let thread = thread::spawn(move || {
+            let (state, wake) = &*shared;
+            loop {
+                {
+                    let mut guard = lock(state);
+                    while guard.pending.is_empty() && !guard.stop {
+                        guard = wake.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                    if guard.stop {
+                        return;
+                    }
+                }
+                // Take the frames while holding the controller, so a static apply
+                // that cancels a zone can't be overwritten by a frame taken earlier.
+                let mut device = lock(&*controller);
+                let frames = std::mem::take(&mut lock(state).pending);
+                if frames.is_empty() {
+                    continue;
+                }
+                let updates: Vec<_> = frames.iter().map(|(zone, color)| (zone.as_str(), *color)).collect();
+                let result = device.frames(&updates);
+                drop(device);
+                let mut guard = lock(state);
+                match result {
+                    Ok(failures) => guard.failures.extend(failures),
+                    Err(error) => guard.fatal = Some(error),
+                }
+            }
+        });
+        Self { state, thread: Some(thread) }
+    }
+
+    fn send(&self, zone: &str, color: Rgb) {
+        lock(&self.state.0).pending.insert(zone.to_owned(), color);
+        self.state.1.notify_one();
+    }
+
+    /// Call while holding the controller lock.
+    fn cancel(&self, zone: &str) {
+        lock(&self.state.0).pending.remove(zone);
+    }
+
+    fn results(&self) -> (Vec<(String, String)>, Option<String>) {
+        let mut guard = lock(&self.state.0);
+        (std::mem::take(&mut guard.failures), guard.fatal.take())
+    }
+}
+
+impl Drop for Pump {
+    fn drop(&mut self) {
+        lock(&self.state.0).stop = true;
+        self.state.1.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct Worker {
     app: AppHandle,
+    // Declared before `hardware` so output threads stop before controllers close.
+    pumps: BTreeMap<String, Pump>,
     hardware: Hardware,
     active: BTreeMap<Target, Assignment>,
     animations: BTreeMap<Target, Animation>,
@@ -228,6 +315,7 @@ impl Worker {
     fn new(app: AppHandle) -> Self {
         Self {
             app,
+            pumps: BTreeMap::new(),
             hardware: Hardware::discover(),
             active: BTreeMap::new(),
             animations: BTreeMap::new(),
@@ -288,7 +376,8 @@ impl Worker {
 
     fn refresh(&mut self) -> Vec<String> {
         self.revision += 1;
-        // Release the old controller handles before enumerating again.
+        // Stop output threads and release the old controller handles before enumerating again.
+        self.pumps.clear();
         self.hardware = Hardware::default();
         self.hardware = Hardware::discover();
         let mut stopped = Vec::new();
@@ -376,16 +465,23 @@ impl Worker {
             }
             other => other,
         };
-        let controller = self
+        let output = self
             .hardware
-            .controller(&target.device_id)
+            .output(&target.device_id)
             .ok_or("Device unavailable.")?;
-        let zone = controller
-            .device()
+        let zone = output
+            .device
             .zones
             .iter()
             .find(|zone| zone.id == target.zone_id)
-            .ok_or("Zone unavailable.")?;
+            .ok_or("Zone unavailable.")?
+            .clone();
+        let shared = Arc::clone(&output.controller);
+        let mut controller = lock(&*shared);
+        // Drop any frame still waiting for this zone so it can't land after this write.
+        if let Some(pump) = self.pumps.get(&target.device_id) {
+            pump.cancel(&target.zone_id);
+        }
         let brightness = assignment.brightness.min(100);
         if let Some(kind) = animation {
             if !zone.direct {
@@ -427,8 +523,8 @@ impl Worker {
             .hardware
             .controllers
             .iter()
-            .flat_map(|controller| {
-                let device = controller.device();
+            .flat_map(|output| {
+                let device = &output.device;
                 device
                     .zones
                     .iter()
@@ -445,72 +541,46 @@ impl Worker {
     }
 
     fn frame(&mut self, now: Instant) -> Vec<String> {
+        let mut failures = self.collect_failures();
         let phase = now.duration_since(self.epoch).as_secs_f64();
-        let mut batches: BTreeMap<String, Vec<(Target, Rgb)>> = BTreeMap::new();
-        for (target, animation) in &self.animations {
+        for (target, animation) in &mut self.animations {
             let frame = animation.frame(phase);
-            if Some(frame) != animation.last {
-                batches
-                    .entry(target.device_id.clone())
-                    .or_default()
-                    .push((target.clone(), frame));
+            if Some(frame) == animation.last {
+                continue;
             }
+            if !self.pumps.contains_key(&target.device_id) {
+                let Some(output) = self.hardware.output(&target.device_id) else {
+                    continue;
+                };
+                self.pumps.insert(target.device_id.clone(), Pump::start(Arc::clone(&output.controller)));
+            }
+            self.pumps[&target.device_id].send(&target.zone_id, frame);
+            animation.last = Some(frame);
         }
-        // Start each transport concurrently for the same sampled phase. Wait for
-        // this batch before advancing so a slow controller cannot accumulate frames.
-        let results = thread::scope(|scope| {
-            let mut jobs = Vec::new();
-            for controller in &mut self.hardware.controllers {
-                let device = controller.device().id.clone();
-                if let Some(batch) = batches.remove(&device) {
-                    jobs.push((
-                        device,
-                        scope.spawn(move || {
-                            let updates: Vec<_> = batch
-                                .iter()
-                                .map(|(target, frame)| (target.zone_id.as_str(), *frame))
-                                .collect();
-                            let result = controller.frames(&updates);
-                            (batch, result)
-                        }),
-                    ));
+        failures.append(&mut self.collect_failures());
+        failures
+    }
+
+    fn collect_failures(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        for (device, pump) in &self.pumps {
+            let (zone_failures, fatal) = pump.results();
+            for (zone_id, error) in zone_failures {
+                let target = Target { device_id: device.clone(), zone_id };
+                if self.animations.remove(&target).is_some() {
+                    self.active.remove(&target);
+                    failures.push(format!("Animation stopped ({device} / {}) — {error}", target.zone_id));
                 }
             }
-            jobs.into_iter()
-                .map(|(device, job)| {
-                    let (batch, result) = job
-                        .join()
-                        .unwrap_or_else(|_| (Vec::new(), Err("Controller worker failed.".into())));
-                    (device, batch, result)
-                })
-                .collect::<Vec<_>>()
-        });
-        let mut failures = Vec::new();
-        for (device, batch, result) in results {
-            match result {
-                Ok(zone_failures) => {
-                    for (zone_id, error) in zone_failures {
-                        let target = Target { device_id: device.clone(), zone_id };
-                        failures.push(format!("Animation stopped ({} / {}) — {error}", device, target.zone_id));
-                        self.animations.remove(&target);
-                        self.active.remove(&target);
+            if let Some(error) = fatal {
+                self.animations.retain(|target, _| {
+                    let retain = &target.device_id != device;
+                    if !retain {
+                        self.active.remove(target);
                     }
-                    for (target, frame) in batch {
-                        if let Some(animation) = self.animations.get_mut(&target) {
-                            animation.last = Some(frame);
-                        }
-                    }
-                }
-                Err(error) => {
-                    self.animations.retain(|target, _| {
-                        let retain = target.device_id != device;
-                        if !retain {
-                            self.active.remove(target);
-                        }
-                        retain
-                    });
-                    failures.push(format!("Animation stopped ({device}) — {error}"));
-                }
+                    retain
+                });
+                failures.push(format!("Animation stopped ({device}) — {error}"));
             }
         }
         failures

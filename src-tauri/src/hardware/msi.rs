@@ -227,8 +227,12 @@ impl Gpu {
     }
 
     fn write(&self, register: u8, values: &mut [u8]) -> Result<(), String> {
+        self.write_with_delay(register, values, Duration::from_millis(20))
+    }
+
+    fn write_with_delay(&self, register: u8, values: &mut [u8], delay: Duration) -> Result<(), String> {
         self.nvapi.transfer(self.handle, register, values, true)?;
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(delay);
         Ok(())
     }
 
@@ -284,8 +288,17 @@ impl Controller for Gpu {
     }
 
     fn frame(&mut self, _zone: &str, color: Rgb) -> Result<(), String> {
-        self.prepare_mode()?;
-        self.color(color)?;
+        // A new color only latches through the same idle → color → static sequence
+        // as a manual apply, and the LEDs go dark while idle. Keep that sequence but
+        // drop the 20 ms settle time inside it, so the dark window is a few
+        // milliseconds instead of ~100 ms per frame.
+        let [red, green, blue] = color;
+        let short = Duration::from_millis(2);
+        self.write_with_delay(0x2e, &mut [0], short)?;
+        self.write_with_delay(MODE_REGISTER, &mut [MODE_IDLE], short)?;
+        self.write_with_delay(0x30, &mut [red], short)?;
+        self.write_with_delay(0x31, &mut [green], short)?;
+        self.write_with_delay(0x32, &mut [blue], short)?;
         self.write(MODE_REGISTER, &mut [MODE_STATIC])
     }
 }
