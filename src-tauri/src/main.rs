@@ -101,9 +101,12 @@ async fn restart_for_rgb_memory(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn apply_lighting(
     lighting: State<'_, Lighting>,
+    profiles: State<'_, Profiles>,
     assignments: Vec<lighting::Assignment>,
 ) -> Result<ApplyResult, String> {
-    lighting.apply(assignments).await
+    let result = lighting.apply(assignments).await?;
+    let _ = profiles.remember(result.active.clone());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -150,7 +153,9 @@ async fn apply_profile(
     profiles: State<'_, Profiles>,
     id: String,
 ) -> Result<ApplyResult, String> {
-    lighting.apply(profiles.assignments(&id)?).await
+    let result = lighting.apply(profiles.assignments(&id)?).await?;
+    let _ = profiles.remember(result.active.clone());
+    Ok(result)
 }
 
 fn main() {

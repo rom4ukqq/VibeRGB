@@ -12,10 +12,11 @@ use windows_sys::Win32::{
 
 use super::{dim, Controller, Device, Effect, Rgb, Zone};
 
-pub const GPU_ID: &str = "msi-4070-super-mlg";
-pub const GPU_NAME: &str = "MSI RTX 4070 SUPER Gaming X Slim MLG";
 const NVIDIA_DEVICE: u32 = 0x2783_10de;
-const MSI_SUBSYSTEM: u32 = 0xe134_1462;
+const GPU_MODELS: &[(u32, &str, &str)] = &[
+    (0xe134_1462, "msi-4070-super-mlg", "MSI RTX 4070 SUPER Gaming X Slim MLG"),
+    (0xe131_1462, "msi-4070-super-white", "MSI RTX 4070 SUPER Gaming X Slim White"),
+];
 const MODE_REGISTER: u8 = 0x22;
 const MODE_IDLE: u8 = 0x1c;
 const MODE_STATIC: u8 = 0x13;
@@ -116,7 +117,7 @@ impl Nvapi {
         }
     }
 
-    fn find_gpu(&self) -> Result<GpuHandle, String> {
+    fn find_gpu(&self) -> Result<(GpuHandle, &'static str, &'static str), String> {
         let mut handles = [null_mut(); 64];
         let mut length = 0;
         // SAFETY: NVAPI accepts a 64-entry GPU handle array and four writable ID fields.
@@ -129,22 +130,26 @@ impl Nvapi {
         let handles = handles
             .get(..length as usize)
             .ok_or("NVAPI returned an invalid GPU list.")?;
-        let mut matches = handles.iter().copied().filter(|handle| {
+        let mut matches = handles.iter().copied().filter_map(|handle| {
             let (mut device, mut subsystem, mut revision, mut extended) = (0, 0, 0, 0);
             let result = unsafe {
                 (self.pci_ids)(
-                    *handle,
+                    handle,
                     &mut device,
                     &mut subsystem,
                     &mut revision,
                     &mut extended,
                 )
             };
-            result == 0 && device == NVIDIA_DEVICE && subsystem == MSI_SUBSYSTEM
+            if result != 0 || device != NVIDIA_DEVICE {
+                return None;
+            }
+            GPU_MODELS.iter().find(|model| model.0 == subsystem)
+                .map(|&(_, id, name)| (handle, id, name))
         });
         let handle = matches
             .next()
-            .ok_or("GPU with PCI ID 10DE:2783 / 1462:E134 not found.")?;
+            .ok_or("No supported MSI Mystic Light GPU found.")?;
         if matches.next().is_some() {
             return Err("Two matching GPUs were found. PCI slot selection is unavailable.".into());
         }
@@ -199,11 +204,11 @@ unsafe impl Send for Gpu {}
 impl Gpu {
     pub fn open() -> Result<Self, String> {
         let nvapi = Nvapi::load()?;
-        let handle = nvapi.find_gpu()?;
+        let (handle, id, name) = nvapi.find_gpu()?;
         nvapi.transfer(handle, MODE_REGISTER, &mut [0], false)?;
         let device = Device {
-            id: GPU_ID.into(),
-            name: GPU_NAME.into(),
+            id: id.into(),
+            name: name.into(),
             detail: "MSI Mystic Light · NVIDIA NVAPI".into(),
             needs_pawnio_install: false,
             needs_pawnio_elevation: false,

@@ -28,8 +28,16 @@ use windows_sys::Win32::{
 
 use super::{dim, smbios::Firmware, Controller, Device, Effect, Rgb, Zone};
 
-pub const BOARD_ID: &str = "asrock-b550m-pro4";
-pub const BOARD_NAME: &str = "ASRock B550M Pro4";
+const BOARDS: &[(&str, &str)] = &[
+    ("B550M Pro4", "asrock-b550m-pro4"),
+    ("B550 Pro4", "asrock-b550-pro4"),
+    ("B550 Steel Legend", "asrock-b550-steel-legend"),
+    ("B550 Phantom Gaming-ITX/ax", "asrock-b550-phantom-gaming-itx-ax"),
+];
+
+pub fn identify(firmware: &Firmware) -> Option<(&'static str, &'static str)> {
+    BOARDS.iter().copied().find(|(model, _)| firmware.board_matches(model))
+}
 const MODE_STATIC: u8 = 0x01;
 const ZONES: [&str; 8] = [
     "RGB LED 1",
@@ -69,10 +77,7 @@ pub struct Board {
 }
 
 impl Board {
-    pub fn open(firmware: &Firmware) -> Result<Self, String> {
-        if !firmware.board_matches("B550M Pro4") {
-            return Err("Windows could not confirm the motherboard model.".into());
-        }
+    pub fn open(id: &str, name: &str) -> Result<Self, String> {
         let hid = open_hid().map_err(|error| format!("Polychrome USB: {error}"))?;
         let availability = read_configuration(&hid, 1)?[0];
         let counts = read_configuration(&hid, 2)?;
@@ -94,8 +99,8 @@ impl Board {
             return Err("The Polychrome controller reported no available zones.".into());
         }
         let device = Device {
-            id: BOARD_ID.into(),
-            name: BOARD_NAME.into(),
+            id: id.into(),
+            name: name.into(),
             detail: "Polychrome USB".into(),
             needs_pawnio_install: false,
             needs_pawnio_elevation: false,

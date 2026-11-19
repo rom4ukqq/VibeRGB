@@ -22,6 +22,8 @@ struct FileContents {
     #[serde(default)]
     startup_id: Option<String>,
     profiles: Vec<Profile>,
+    #[serde(default)]
+    last_scene: Vec<Assignment>,
 }
 
 #[derive(Serialize)]
@@ -55,10 +57,21 @@ impl Profiles {
     }
 
     pub fn startup(&self) -> Result<Option<Vec<Assignment>>, String> {
-        let library = self.list()?;
-        let Some(id) = library.startup_id else { return Ok(None) };
-        library.profiles.into_iter().find(|profile| profile.id == id)
+        let path = self.0.lock().map_err(|error| error.to_string())?;
+        let file = read(&path)?;
+        let Some(id) = file.startup_id else {
+            return Ok((!file.last_scene.is_empty()).then_some(file.last_scene));
+        };
+        file.profiles.into_iter().find(|profile| profile.id == id)
             .map(|profile| Some(profile.assignments)).ok_or_else(|| "Profile not found.".into())
+    }
+
+    pub fn remember(&self, assignments: Vec<Assignment>) -> Result<(), String> {
+        self.edit(|file| {
+            file.last_scene = assignments;
+            Ok(())
+        })
+        .map(|_| ())
     }
 
     pub fn set_startup(&self, id: Option<String>) -> Result<ProfileLibrary, String> {

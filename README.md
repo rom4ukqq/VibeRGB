@@ -18,8 +18,8 @@ For a release, update the package, Cargo and Tauri versions and their lockfiles 
 
 | Device | Connection |
 | --- | --- |
-| ASRock B550M Pro4 | Polychrome USB HID |
-| MSI GeForce RTX 4070 SUPER Gaming X Slim MLG | NVIDIA NVAPI I²C |
+| ASRock B550M Pro4, B550 Pro4, B550 Steel Legend, B550 Phantom Gaming-ITX/ax | Polychrome USB HID (26CE:01A2), including lighting connected to the reported RGB/ARGB headers |
+| MSI GeForce RTX 4070 SUPER Gaming X Slim MLG and Gaming X Slim White | NVIDIA NVAPI I²C (subsystems 1462:E134 and 1462:E131 respectively) |
 | Supported ENE DDR4 modules on ASRock B550M Pro4 | AMD SMBus via [PawnIO](https://pawnio.eu/) and the signed [SmbusPIIX4 module](https://github.com/namazso/PawnIO.Modules/releases) |
 
 If PawnIO is missing, select a memory entry and click **Install PawnIO**. The app includes the official installer and signed SMBus module. If Windows denies access to the installed driver, select the memory entry and click **Restart as administrator**. Approve the Windows elevation prompt. VibeRGB then detects the ENE modules at their individual lighting addresses. For portable distribution, include the notices from `src-tauri/resources/pawnio` (`COPYING` and `README.txt`) alongside the executable.

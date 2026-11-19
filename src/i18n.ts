@@ -128,8 +128,8 @@ const diagnosticRu = [
   "Windows не подтвердила модель материнской платы."
  ],
  [
-  "GPU with PCI ID 10DE:2783 / 1462:E134 not found.",
-  "Не найдена видеокарта с PCI ID 10DE:2783 / 1462:E134."
+  "No supported MSI Mystic Light GPU found.",
+  "Поддерживаемая видеокарта MSI Mystic Light не найдена."
  ],
  [
   "This build does not support the RGB controller.",

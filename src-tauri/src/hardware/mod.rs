@@ -79,12 +79,11 @@ impl Hardware {
                 unavailable: firmware.memory(),
                 ..Self::default()
             };
-            hardware.add(
-                asrock::BOARD_ID,
-                asrock::BOARD_NAME,
-                asrock::Board::open(&firmware),
-            );
-            hardware.add(msi::GPU_ID, msi::GPU_NAME, msi::Gpu::open());
+            if let Some((model, id)) = asrock::identify(&firmware) {
+                let name = format!("ASRock {model}");
+                hardware.add(id, &name, asrock::Board::open(id, &name));
+            }
+            hardware.add("msi-mystic-light", "MSI Mystic Light GPU", msi::Gpu::open());
             if firmware.board_matches("B550M Pro4")
                 && hardware.unavailable.iter().any(is_adata_memory)
             {
