@@ -5,11 +5,12 @@ import { useUpdates } from './useUpdates';
 import { version as appVersion } from '../package.json';
 import { Button, FluentProvider, webDarkTheme } from '@fluentui/react-components';
 import { listen } from '@tauri-apps/api/event';
-import { api, type ApplyResult, type Assignment, type Device, type Effect, type ProfileLibrary, type RGB } from './api';
+import { api, type ApplyResult, type Assignment, type Device, type Calibration, type Effect, type ProfileLibrary, type RGB } from './api';
 import { localizeDiagnostic, messages, sceneName, type Language, type Messages } from './i18n';
 import { MatrixBackdrop } from './CanvasMatrix';
 import { Profiles } from './profiles';
 import { ColorPicker } from './ColorPicker';
+import { CalibrationPanel } from './Calibration';
 import './style.css';
 
 const DEFAULT_COLOR = '#00AAFF';
@@ -42,6 +43,7 @@ function App() {
   const updates = useUpdates(autoCheck);
   const [group, setGroup] = useState<Group>('sync');
   const [devices, setDevices] = useState<Device[]>([]);
+  const [calibrations, setCalibrations] = useState<Record<string, Calibration>>({});
   const [library, setLibrary] = useState<ProfileLibrary>({ profiles: [], startupId: null });
   const revision = useRef(-1);
   const [active, setActive] = useState<Assignment[]>([]);
@@ -85,6 +87,7 @@ function App() {
       if (disposed) return;
       if (hardware.status === 'fulfilled') {
         setDevices(hardware.value.devices);
+        setCalibrations(hardware.value.calibrations);
         acceptState(hardware.value.state);
       }
       if (saved.status === 'fulfilled') setLibrary(saved.value);
@@ -154,6 +157,24 @@ function App() {
     void run(async () => showResult(await api.apply(assignments), skipped));
   }
 
+  function showWhite() {
+    if (!device) return;
+    const assignments = device.zones.map((zone): Assignment => ({
+      target: { deviceId: device.id, zoneId: zone.id }, mode: 'solid', color: [255, 255, 255], brightness, speed: 100,
+    }));
+    void run(async () => showResult(await api.apply(assignments)));
+  }
+
+  async function calibrate(deviceId: string, value: Calibration) {
+    setCalibrations(current => ({ ...current, [deviceId]: value }));
+    try {
+      const result = await api.calibrate(deviceId, value);
+      if (acceptState(result) && result.issues.length) setNotice({ label: 'failed', issues: result.issues });
+    } catch (error) {
+      setNotice({ label: 'failed', issues: [String(error)] });
+    }
+  }
+
   function selectDevice(id: string) {
     setDeviceId(id);
     setZoneId('');
@@ -161,7 +182,8 @@ function App() {
   }
 
   async function refreshDevices() {
-    const { devices: found, state } = await api.devices(true);
+    const { devices: found, state, calibrations: tuned } = await api.devices(true);
+    setCalibrations(tuned);
     if (acceptState(state) && state.issues.length) setNotice({ label: 'refreshIssues', issues: state.issues });
     const current = found.find(item => item.id === deviceId);
     if (deviceId && !current) selectDevice('');
@@ -350,6 +372,8 @@ function App() {
                   onClick={apply}>{t.apply}</Button>
               </>}
             </section>
+            {device && calibrations[device.id] && <CalibrationPanel key={device.id} value={calibrations[device.id]} t={t}
+              disabled={pending} onShowWhite={showWhite} onChange={value => calibrate(device.id, value)} />}
           </div>}
         </div>
       </main>

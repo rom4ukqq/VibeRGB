@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod calibration;
 mod hardware;
 mod lighting;
 mod profiles;
@@ -10,6 +11,7 @@ use tauri::{
     AppHandle, Manager, State, WindowEvent, Wry,
 };
 
+use calibration::{Calibration, Calibrations};
 use lighting::{ApplyResult, Discovery, Lighting};
 use profiles::{ProfileLibrary, Profiles};
 
@@ -110,6 +112,17 @@ async fn apply_lighting(
 }
 
 #[tauri::command]
+async fn set_calibration(
+    lighting: State<'_, Lighting>,
+    calibrations: State<'_, Calibrations>,
+    device_id: String,
+    calibration: Calibration,
+) -> Result<ApplyResult, String> {
+    let calibration = calibrations.save(&device_id, calibration)?;
+    lighting.calibrate(device_id, calibration).await
+}
+
+#[tauri::command]
 fn list_profiles(profiles: State<'_, Profiles>) -> Result<ProfileLibrary, String> {
     profiles.list()
 }
@@ -173,7 +186,9 @@ fn main() {
         .plugin(tauri_plugin_autostart::Builder::new().arg("--autostart").build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let config = app.path().app_config_dir()?.join("profiles.json");
+            let directory = app.path().app_config_dir()?;
+            let config = directory.join("profiles.json");
+            let calibrations = Calibrations::new(directory.join("calibration.json"));
             app.manage(setup_tray(app.handle())?);
             if !std::env::args_os().any(|arg| arg == "--autostart") {
                 show_window(app.handle());
@@ -181,7 +196,9 @@ fn main() {
             let profiles = Profiles::new(config);
             let startup = profiles.startup();
             app.manage(profiles);
-            app.manage(Lighting::start(app.handle().clone(), startup));
+            let saved = calibrations.load();
+            app.manage(calibrations);
+            app.manage(Lighting::start(app.handle().clone(), startup, saved));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -197,6 +214,7 @@ fn main() {
             install_pawnio,
             restart_for_rgb_memory,
             apply_lighting,
+            set_calibration,
             list_profiles,
             save_profile,
             replace_profile,

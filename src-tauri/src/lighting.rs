@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::hardware::{dim, Device, Hardware, Rgb, SharedController};
+use crate::{
+    calibration::{self, Calibration},
+    hardware::{dim, Device, Hardware, Rgb, SharedController},
+};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const COLOR_CYCLE_SECONDS: f64 = 6.0;
@@ -55,22 +58,28 @@ pub struct ApplyResult {
 pub struct Discovery {
     devices: Vec<Device>,
     state: ApplyResult,
+    calibrations: BTreeMap<String, Calibration>,
 }
 
 enum Request {
     Active(Sender<Vec<Assignment>>),
     Devices(bool, Sender<Discovery>),
     Apply(Vec<Assignment>, Sender<ApplyResult>),
+    Calibrate(String, Calibration, Sender<ApplyResult>),
     Shutdown(Sender<()>),
 }
 
 pub struct Lighting(Sender<Request>);
 
 impl Lighting {
-    pub fn start(app: AppHandle, startup: Result<Option<Vec<Assignment>>, String>) -> Self {
+    pub fn start(
+        app: AppHandle,
+        startup: Result<Option<Vec<Assignment>>, String>,
+        calibrations: BTreeMap<String, Calibration>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let mut worker = Worker::new(app);
+            let mut worker = Worker::new(app, calibrations);
             worker.initial_issues = match startup {
                 Ok(Some(assignments)) => worker.apply(assignments).0.issues,
                 Ok(None) => Vec::new(),
@@ -92,6 +101,10 @@ impl Lighting {
     pub async fn apply(&self, assignments: Vec<Assignment>) -> Result<ApplyResult, String> {
         self.request(|reply| Request::Apply(assignments, reply))
             .await
+    }
+
+    pub async fn calibrate(&self, device_id: String, calibration: Calibration) -> Result<ApplyResult, String> {
+        self.request(|reply| Request::Calibrate(device_id, calibration, reply)).await
     }
 
     pub fn shutdown(&self) {
@@ -309,10 +322,11 @@ struct Worker {
     revision: u64,
     initial_issues: Vec<String>,
     epoch: Instant,
+    calibrations: BTreeMap<String, Calibration>,
 }
 
 impl Worker {
-    fn new(app: AppHandle) -> Self {
+    fn new(app: AppHandle, calibrations: BTreeMap<String, Calibration>) -> Self {
         Self {
             app,
             pumps: BTreeMap::new(),
@@ -322,6 +336,7 @@ impl Worker {
             revision: 0,
             initial_issues: Vec::new(),
             epoch: Instant::now(),
+            calibrations,
         }
     }
 
@@ -339,9 +354,16 @@ impl Worker {
                     if refresh {
                         issues.extend(self.refresh());
                     }
+                    let devices = self.hardware.devices();
+                    let calibrations = devices
+                        .iter()
+                        .filter(|device| !device.zones.is_empty())
+                        .map(|device| (device.id.clone(), calibration::lookup(&self.calibrations, &device.id)))
+                        .collect();
                     let _ = reply.send(Discovery {
-                        devices: self.hardware.devices(),
+                        devices,
                         state: self.snapshot(0, issues),
+                        calibrations,
                     });
                 }
                 Ok(Request::Active(reply)) => {
@@ -351,6 +373,13 @@ impl Worker {
                     let (result, frame_start) = self.apply(assignments);
                     if let Some(started) = frame_start {
                         next_frame = started + FRAME_INTERVAL;
+                    }
+                    let _ = reply.send(result);
+                }
+                Ok(Request::Calibrate(device_id, calibration, reply)) => {
+                    let result = self.calibrate(device_id, calibration);
+                    if !self.animations.is_empty() {
+                        next_frame = Instant::now();
                     }
                     let _ = reply.send(result);
                 }
@@ -483,6 +512,7 @@ impl Worker {
             pump.cancel(&target.zone_id);
         }
         let brightness = assignment.brightness.min(100);
+        let calibration = calibration::lookup(&self.calibrations, &target.device_id);
         if let Some(kind) = animation {
             if !zone.direct {
                 return Err("Animation is unavailable on this zone.".into());
@@ -494,7 +524,7 @@ impl Worker {
                     kind.color(base, self.epoch.elapsed().as_secs_f64() * speed),
                     brightness,
                 );
-                controller.begin_animation(&target.zone_id, initial)?;
+                controller.begin_animation(&target.zone_id, calibration.apply(initial))?;
             }
             self.animations.insert(
                 target.clone(),
@@ -512,9 +542,35 @@ impl Worker {
         {
             return Err("Effect unavailable.".into());
         }
-        controller.apply(&target.zone_id, mode, assignment.color, brightness)?;
+        controller.apply(&target.zone_id, mode, calibration.apply(assignment.color), brightness)?;
         self.animations.remove(target);
         Ok(())
+    }
+
+    /// Stores a device calibration and shows it right away: static zones are
+    /// written again and animated zones pick it up on the next frame.
+    fn calibrate(&mut self, device_id: String, calibration: Calibration) -> ApplyResult {
+        self.revision += 1;
+        self.calibrations.insert(device_id.clone(), calibration);
+        let mut issues = Vec::new();
+        let static_zones: Vec<_> = self
+            .active
+            .values()
+            .filter(|assignment| assignment.target.device_id == device_id)
+            .filter(|assignment| !self.animations.contains_key(&assignment.target))
+            .cloned()
+            .collect();
+        for assignment in static_zones {
+            if let Err(error) = self.apply_one(&assignment) {
+                issues.push(format!("{} / {} — {error}", device_id, assignment.target.zone_id));
+            }
+        }
+        for (target, animation) in &mut self.animations {
+            if target.device_id == device_id {
+                animation.last = None;
+            }
+        }
+        self.snapshot(0, issues)
     }
 
     fn zone_phase_offset(&self, target: &Target) -> f64 {
@@ -554,7 +610,8 @@ impl Worker {
                 };
                 self.pumps.insert(target.device_id.clone(), Pump::start(Arc::clone(&output.controller)));
             }
-            self.pumps[&target.device_id].send(&target.zone_id, frame);
+            let output = calibration::lookup(&self.calibrations, &target.device_id).apply(frame);
+            self.pumps[&target.device_id].send(&target.zone_id, output);
             animation.last = Some(frame);
         }
         failures.append(&mut self.collect_failures());

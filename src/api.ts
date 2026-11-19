@@ -11,11 +11,13 @@ export type Device = {
 };
 export type Profile = { id: string; name: string; assignments: Assignment[] };
 export type ProfileLibrary = { profiles: Profile[]; startupId: string | null };
+export type Calibration = { red: number; green: number; blue: number };
 export type ApplyResult = { revision: number; count: number; issues: string[]; active: Assignment[] };
 
 export const api = {
   language: (language: string) => invoke<void>('set_language', { language }),
-  devices: (refresh = false) => invoke<{ devices: Device[]; state: ApplyResult }>('devices', { refresh }),
+  devices: (refresh = false) => invoke<{ devices: Device[]; state: ApplyResult; calibrations: Record<string, Calibration> }>('devices', { refresh }),
+  calibrate: (deviceId: string, calibration: Calibration) => invoke<ApplyResult>('set_calibration', { deviceId, calibration }),
   installPawnio: () => invoke<'installed' | 'cancelled' | 'restartRequired'>('install_pawnio'),
   restartForRgbMemory: () => invoke<void>('restart_for_rgb_memory'),
   apply: (assignments: Assignment[]) => invoke<ApplyResult>('apply_lighting', { assignments }),
